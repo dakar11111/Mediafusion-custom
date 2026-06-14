@@ -1,0 +1,134 @@
+[project]
+name = "mediafusion"
+version = "6.0.0-beta.22"
+description = "Media Fusion Add-On For Stremio & Kodi - A powerful streaming API with support for multiple providers and advanced scraping capabilities"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+    { name = "Mohamed Zumair", email = "mhdzumair@gmail.com" },
+    { name = "ragmehos" }
+]
+
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic[email]",
+    "requests",
+    "beautifulsoup4",
+    "dnspython",
+    "jinja2",
+    "apscheduler",
+    "python-dateutil",
+    "bencodepy",
+    "pydantic-settings",
+    "pycryptodome",
+    "pillow",
+    "httpx",
+    "uvloop; sys_platform != \"win32\"",
+    "thefuzz",
+    "pikpakapi",
+    "diskcache",
+    "demagnetize",
+    "redis[hiredis]",
+    "gunicorn",
+    "scrapy",
+    "aioqbt",
+    "aiowebdav",
+    "m3u-ipytv",
+    "python-multipart",
+    "prometheus-client",
+    "pyasynctracker",
+    "cinemagoerng",
+    "tqdm",
+    "parsett",
+    "tenacity",
+    "ratelimit",
+    "qrcode",
+    "seedrcc",
+    "pytz",
+    "aiohttp-socks",
+    "socksio",
+    "tzdata",
+    "ipython",
+    "humanize",
+    "dateparser",
+    "feedparser",
+    "xmltodict",
+    "sqlmodel",
+    "alembic",
+    "asyncpg",
+    "typer",
+    "telethon",
+    "yt-dlp",
+    "aioboto3",
+    "aiosmtplib",
+    "taskiq",
+    "taskiq-redis",
+    "scrapling[fetchers]",
+    "pyinstrument",
+    "orjson",
+]
+
+[dependency-groups]
+dev = [
+    "pysocks",
+    "requests-cache",
+    "kodistubs",
+    "ruff",
+    "pytest",
+    "pytest-asyncio",
+    "locust>=2.43.4",
+    "httpx>=0.28.1",
+]
+
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocs-glightbox>=0.4",
+]
+
+[tool.uv.sources]
+pikpakapi = {git = "git+https://github.com/mhdzumair/PikPakAPI.git"}
+aioqbt = {git = "git+https://github.com/mhdzumair/aioqbt.git"}
+cinemagoerng = {git = "git+https://github.com/mhdzumair/cinemagoerng.git"}
+demagnetize = {git = "git+https://github.com/mhdzumair/demagnetize.git"}
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+exclude = ["python-deprecated"]
+
+[tool.ruff.lint]
+select = [
+    "E",        # pycodestyle errors
+    "W",        # pycodestyle warnings
+    "F",        # Pyflakes
+    "PLC0415",  # import not at top-level of file
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "E712",   # comparison to True/False (needed for SQLAlchemy column comparisons)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Migration scripts may have special requirements
+"migrations/**/*.py" = ["E712"]
+# Kodi plugin has different conventions
+"kodi/**/lib/*.py" = ["F841"]
+# Standalone scripts use conditional/deferred imports for startup performance
+"scripts/**/*.py" = ["PLC0415"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+python_classes = ["Test*"]
+addopts = ["-v", "--tb=short"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

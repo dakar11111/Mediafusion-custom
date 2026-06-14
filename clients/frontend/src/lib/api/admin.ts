@@ -1,0 +1,1152 @@
+import { apiClient } from './client'
+
+// ============================================
+// Types - Episode Files
+// ============================================
+
+export interface EpisodeFileItem {
+  id: number
+  season_number: number
+  episode_number: number
+  file_index?: number
+  filename?: string
+  size?: number
+}
+
+// ============================================
+// Types - Metadata
+// ============================================
+
+export interface ExternalIds {
+  imdb?: string
+  tmdb?: number
+  tvdb?: number
+  mal?: number
+}
+
+export interface MetadataItem {
+  id: number // Internal media_id
+  external_ids?: ExternalIds // All external IDs
+  type: 'movie' | 'series' | 'tv'
+  title: string
+  year?: number
+  poster?: string
+  is_poster_working: boolean
+  is_add_title_to_poster: boolean
+  background?: string
+  description?: string
+  runtime?: string
+  website?: string
+
+  // Read-only computed fields
+  total_streams: number
+  created_at: string
+  updated_at?: string
+  last_stream_added?: string
+
+  // Type-specific fields (Movie/Series)
+  imdb_rating?: number
+  tmdb_rating?: number
+  parent_guide_nudity_status?: string
+
+  // Series-specific
+  end_date?: string // ISO format date string (YYYY-MM-DD)
+
+  // TV-specific
+  country?: string
+  tv_language?: string
+  logo?: string
+
+  // Relationships
+  genres: string[]
+  catalogs: string[]
+  stars: string[]
+  parental_certificates: string[]
+  aka_titles: string[]
+
+  // Content moderation
+  is_user_created?: boolean
+  is_blocked?: boolean
+  blocked_at?: string
+  block_reason?: string
+}
+
+// ============================================
+// Types - Content Moderation
+// ============================================
+
+export interface BlockMediaRequest {
+  reason?: string
+}
+
+export interface BlockMediaResponse {
+  media_id: number
+  is_blocked: boolean
+  blocked_at?: string
+  blocked_by?: string
+  block_reason?: string
+  message: string
+}
+
+export interface BlockedMediaItem {
+  id: number
+  title: string
+  type: 'movie' | 'series' | 'tv'
+  year?: number
+  poster?: string
+  external_ids: Record<string, string | number>
+  is_blocked?: boolean
+  is_keyword_blocked?: boolean
+  blocked_at?: string
+  blocked_by?: string
+  block_reason?: string
+}
+
+export interface BlockedMediaListResponse {
+  items: BlockedMediaItem[]
+  total: number
+  page: number
+  page_size: number
+  has_more: boolean
+}
+
+export interface BlockedMediaParams {
+  type?: 'movie' | 'series' | 'tv'
+  search?: string
+  page?: number
+  page_size?: number
+}
+
+export interface MetadataListParams {
+  page?: number
+  per_page?: number
+  media_type?: 'movie' | 'series' | 'tv'
+  search?: string
+  has_streams?: boolean
+}
+
+export interface MetadataListResponse {
+  items: MetadataItem[]
+  total: number
+  page: number
+  per_page: number
+  pages: number
+}
+
+export interface MetadataUpdateRequest {
+  // Base fields
+  title?: string
+  year?: number
+  poster?: string
+  is_poster_working?: boolean
+  is_add_title_to_poster?: boolean
+  background?: string
+  description?: string
+  runtime?: string
+  website?: string
+
+  // Type-specific fields (Movie/Series)
+  imdb_rating?: number
+  tmdb_rating?: number
+  parent_guide_nudity_status?: string
+  nudity_status?: string // Nudity status on Media table
+
+  // Series-specific
+  end_date?: string // ISO format date string (YYYY-MM-DD)
+
+  // TV-specific
+  country?: string
+  tv_language?: string
+  logo?: string
+
+  // Relationships
+  genres?: string[]
+  catalogs?: string[]
+  stars?: string[]
+  parental_certificates?: string[]
+  aka_titles?: string[]
+}
+
+export interface MetadataStatsResponse {
+  total_movies: number
+  total_series: number
+  total_tv: number
+  total_streams: number
+  total_tv_streams: number
+}
+
+// Nudity status options
+export const NUDITY_STATUS_OPTIONS = [
+  { value: 'None', label: 'None' },
+  { value: 'Mild', label: 'Mild' },
+  { value: 'Moderate', label: 'Moderate' },
+  { value: 'Severe', label: 'Severe' },
+  { value: 'Unknown', label: 'Unknown' },
+  { value: 'Disable', label: 'Disable' },
+]
+
+// ============================================
+// Types - Torrent Streams
+// ============================================
+
+export interface TorrentStreamItem {
+  id: string
+  meta_id: string
+  meta_title?: string
+
+  // Basic info
+  name: string // Stream display name (formerly torrent_name)
+  size: number
+  source: string
+  resolution?: string
+  codec?: string
+  bit_depth?: string
+  release_group?: string
+  quality?: string
+  seeders?: number
+  leechers?: number
+  is_blocked: boolean
+  is_active: boolean
+
+  // Normalized quality attributes (arrays)
+  audio_formats: string[]
+  channels: string[]
+  hdr_formats: string[]
+
+  // Release flags
+  is_remastered: boolean
+  is_upscaled: boolean
+  is_proper: boolean
+  is_repack: boolean
+  is_extended: boolean
+  is_complete: boolean
+  is_dubbed: boolean
+  is_subbed: boolean
+
+  // Additional metadata
+  torrent_type: string
+  uploader?: string
+  uploaded_at?: string
+
+  // File info (for movies)
+  filename?: string
+  file_index?: number
+  file_count: number
+  total_size: number
+
+  // Read-only
+  playback_count: number
+  created_at: string
+  updated_at?: string
+
+  // Relationships
+  languages: string[]
+  trackers: string[]
+  files: StreamFileItem[]
+}
+
+export interface StreamFileItem {
+  id: number
+  file_index?: number
+  filename: string
+  file_path?: string
+  size?: number
+  file_type: string
+}
+
+export interface TorrentStreamListParams {
+  page?: number
+  per_page?: number
+  meta_id?: string
+  search?: string
+  source?: string
+  is_blocked?: boolean
+  resolution?: string
+}
+
+export interface TorrentStreamListResponse {
+  items: TorrentStreamItem[]
+  total: number
+  page: number
+  per_page: number
+  pages: number
+}
+
+export interface TorrentStreamUpdateRequest {
+  name?: string
+  source?: string
+  resolution?: string
+  codec?: string
+  quality?: string
+  bit_depth?: string
+  seeders?: number
+  leechers?: number
+  is_blocked?: boolean
+
+  // Normalized quality attributes (arrays)
+  audio_formats?: string[]
+  channels?: string[]
+  hdr_formats?: string[]
+
+  // Additional metadata
+  torrent_type?: string
+  uploader?: string
+  release_group?: string
+  uploaded_at?: string
+
+  // Relationships
+  languages?: string[]
+  trackers?: string[]
+}
+
+// Torrent type options
+export const TORRENT_TYPE_OPTIONS = [
+  { value: 'public', label: 'Public' },
+  { value: 'semi-private', label: 'Semi-Private' },
+  { value: 'private', label: 'Private' },
+  { value: 'web-seed', label: 'Web Seed' },
+]
+
+// ============================================
+// Types - TV Streams
+// ============================================
+
+export interface TVStreamItem {
+  id: number
+  meta_id: string
+  meta_title?: string
+
+  // Basic info
+  name: string
+  url?: string
+  ytId?: string
+  externalUrl?: string
+  source: string
+  country?: string
+
+  // Status
+  is_active: boolean
+  is_blocked: boolean
+  test_failure_count: number // Read-only
+
+  // DRM
+  drm_key_id?: string
+  drm_key?: string
+
+  // Advanced
+  behaviorHints?: Record<string, unknown>
+
+  // Read-only
+  created_at: string
+  updated_at?: string
+
+  // Relationships
+  namespaces: string[]
+}
+
+export interface TVStreamListParams {
+  page?: number
+  per_page?: number
+  meta_id?: string
+  search?: string
+  source?: string
+  is_active?: boolean
+  country?: string
+}
+
+export interface TVStreamListResponse {
+  items: TVStreamItem[]
+  total: number
+  page: number
+  per_page: number
+  pages: number
+}
+
+export interface TVStreamUpdateRequest {
+  name?: string
+  url?: string
+  ytId?: string
+  externalUrl?: string
+  source?: string
+  country?: string
+  is_active?: boolean
+
+  // DRM
+  drm_key_id?: string
+  drm_key?: string
+
+  // Advanced
+  behaviorHints?: Record<string, unknown>
+
+  // Relationships
+  namespaces?: string[]
+}
+
+// ============================================
+// Helper to build query params
+// ============================================
+
+function buildQueryString<T extends object>(params: T): string {
+  const searchParams = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) {
+      searchParams.append(key, String(value))
+    }
+  }
+  const query = searchParams.toString()
+  return query ? `?${query}` : ''
+}
+
+// Note: The admin API is at /api/admin, not /api/v1
+// We need to bypass the standard client's base URL handling
+const ADMIN_BASE = '/api/v1/admin'
+
+async function adminGet<T>(endpoint: string, params?: Record<string, string | number | undefined>): Promise<T> {
+  const token = apiClient.getAccessToken()
+  const apiKey = apiClient.getApiKey()
+  const headers: HeadersInit = {}
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  if (apiKey) {
+    headers['X-API-Key'] = apiKey
+  }
+
+  const searchParams = new URLSearchParams()
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) {
+        searchParams.set(key, String(value))
+      }
+    }
+  }
+  const query = searchParams.toString()
+  const response = await fetch(`${ADMIN_BASE}${endpoint}${query ? `?${query}` : ''}`, { headers })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }))
+    throw new Error(error.detail || 'An error occurred')
+  }
+
+  return response.json()
+}
+
+async function adminPost<T>(endpoint: string, data?: unknown): Promise<T> {
+  const token = apiClient.getAccessToken()
+  const apiKey = apiClient.getApiKey()
+  const headers: HeadersInit = {
+    'Content-Type': 'application/json',
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  if (apiKey) {
+    headers['X-API-Key'] = apiKey
+  }
+
+  const response = await fetch(`${ADMIN_BASE}${endpoint}`, {
+    method: 'POST',
+    headers,
+    body: data ? JSON.stringify(data) : undefined,
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }))
+    throw new Error(error.detail || 'An error occurred')
+  }
+
+  return response.json()
+}
+
+async function adminDelete<T>(endpoint: string): Promise<T> {
+  const token = apiClient.getAccessToken()
+  const apiKey = apiClient.getApiKey()
+  const headers: HeadersInit = {
+    'Content-Type': 'application/json',
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  if (apiKey) {
+    headers['X-API-Key'] = apiKey
+  }
+
+  const response = await fetch(`${ADMIN_BASE}${endpoint}`, {
+    method: 'DELETE',
+    headers,
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }))
+    throw new Error(error.detail || 'An error occurred')
+  }
+
+  // Handle 204 No Content
+  if (response.status === 204) {
+    return {} as T
+  }
+
+  return response.json()
+}
+
+// ============================================
+// Types - External Metadata
+// ============================================
+
+export interface ExternalMetadataPreview {
+  provider: 'imdb' | 'tmdb'
+  external_id: string
+  title: string
+  year?: number
+  description?: string
+  poster?: string
+  background?: string
+  genres: string[]
+  imdb_rating?: number
+  tmdb_rating?: number
+  nudity_status?: string
+  parental_certificates: string[]
+  stars: string[]
+  aka_titles: string[]
+  runtime?: string
+  imdb_id?: string
+  tmdb_id?: string
+}
+
+export interface FetchExternalRequest {
+  provider: 'imdb' | 'tmdb'
+  external_id: string
+}
+
+export interface MigrateIdRequest {
+  new_external_id: string
+}
+
+export interface SearchExternalRequest {
+  provider: 'imdb' | 'tmdb'
+  title: string
+  year?: number
+  media_type?: 'movie' | 'series'
+}
+
+export interface SearchExternalResponse {
+  results: ExternalMetadataPreview[]
+}
+
+// ============================================
+// Admin API
+// ============================================
+
+export const adminApi = {
+  // ============================================
+  // Metadata
+  // ============================================
+
+  deleteMetadata: async (mediaId: number): Promise<{ message: string }> => {
+    return adminDelete<{ message: string }>(`/metadata/${mediaId}`)
+  },
+
+  // ============================================
+  // Content Moderation
+  // ============================================
+
+  /**
+   * List all blocked media items (Moderator/Admin only).
+   */
+  getBlockedMedia: async (params: BlockedMediaParams = {}): Promise<BlockedMediaListResponse> => {
+    return adminGet<BlockedMediaListResponse>('/media/blocked', {
+      type: params.type,
+      search: params.search,
+      page: params.page,
+      page_size: params.page_size,
+    })
+  },
+
+  /**
+   * Block media content (Moderator/Admin only).
+   * Blocked content is hidden from regular users.
+   */
+  blockMedia: async (mediaId: number, request: BlockMediaRequest = {}): Promise<BlockMediaResponse> => {
+    return adminPost<BlockMediaResponse>(`/metadata/${mediaId}/block`, request)
+  },
+
+  /**
+   * Unblock media content (Moderator/Admin only).
+   * Makes content visible to regular users again.
+   */
+  unblockMedia: async (mediaId: number): Promise<BlockMediaResponse> => {
+    return adminPost<BlockMediaResponse>(`/metadata/${mediaId}/unblock`, {})
+  },
+
+  // ============================================
+  // Torrent Streams
+  // ============================================
+
+  blockTorrentStream: async (streamId: number): Promise<{ message: string }> => {
+    return adminPost<{ message: string }>(`/torrent-streams/${streamId}/block`)
+  },
+}
+
+// ============================================
+// Database Admin Types
+// ============================================
+
+export interface DatabaseStats {
+  version: string
+  database_name: string
+  size_human: string
+  total_size_bytes: number
+  connection_count: number
+  max_connections: number
+  cache_hit_ratio: number
+  uptime_seconds: number
+  active_queries: number
+  deadlocks: number
+  transactions_committed: number
+  transactions_rolled_back: number
+}
+
+export interface TableInfo {
+  name: string
+  schema_name: string
+  row_count: number
+  size_human: string
+  size_bytes: number
+  index_size_human: string
+  index_size_bytes: number
+  last_vacuum: string | null
+  last_analyze: string | null
+  last_autovacuum: string | null
+  last_autoanalyze: string | null
+}
+
+export interface TablesListResponse {
+  tables: TableInfo[]
+  total_count: number
+  total_size_human: string
+  total_size_bytes: number
+}
+
+export interface ColumnInfo {
+  name: string
+  data_type: string
+  is_nullable: boolean
+  default_value: string | null
+  is_primary_key: boolean
+  is_foreign_key: boolean
+  foreign_key_ref: string | null
+}
+
+export interface IndexInfo {
+  name: string
+  columns: string[]
+  is_unique: boolean
+  is_primary: boolean
+  index_type: string
+}
+
+export interface ForeignKeyInfo {
+  name: string
+  columns: string[]
+  referenced_table: string
+  referenced_columns: string[]
+}
+
+export interface TableSchema {
+  name: string
+  schema_name: string
+  columns: ColumnInfo[]
+  indexes: IndexInfo[]
+  foreign_keys: ForeignKeyInfo[]
+  row_count: number
+  size_human: string
+}
+
+export type FilterOperator =
+  | 'equals'
+  | 'not_equals'
+  | 'contains'
+  | 'starts_with'
+  | 'ends_with'
+  | 'is_null'
+  | 'is_not_null'
+  | 'gt'
+  | 'gte'
+  | 'lt'
+  | 'lte'
+  | 'array_contains'
+  | 'array_not_contains'
+  | 'array_empty'
+  | 'array_not_empty'
+  | 'array_length_eq'
+  | 'array_length_gt'
+  | 'json_is_null'
+  | 'json_is_not_null'
+
+export interface FilterCondition {
+  column: string
+  operator: FilterOperator
+  value?: string
+}
+
+export interface TableDataParams {
+  page?: number
+  per_page?: number
+  order_by?: string
+  order_dir?: 'asc' | 'desc'
+  search?: string
+  /** Multiple filters as array - preferred method */
+  filters?: FilterCondition[]
+  /** @deprecated Use filters instead */
+  filter_column?: string
+  /** @deprecated Use filters instead */
+  filter_operator?: FilterOperator
+  /** @deprecated Use filters instead */
+  filter_value?: string
+}
+
+export interface TableDataResponse {
+  table: string
+  columns: string[]
+  rows: Record<string, unknown>[]
+  total: number
+  page: number
+  per_page: number
+  pages: number
+}
+
+export interface OrphanRecord {
+  table: string
+  id: string
+  reason: string
+  created_at: string | null
+}
+
+export interface OrphansResponse {
+  orphans: OrphanRecord[]
+  total_count: number
+  by_type: Record<string, number>
+}
+
+export interface OrphanCleanupRequest {
+  tables?: string[]
+  dry_run?: boolean
+}
+
+export interface OrphanCleanupResponse {
+  dry_run: boolean
+  deleted: Record<string, number>
+  would_delete: Record<string, number>
+}
+
+export interface MaintenanceRequest {
+  tables?: string[]
+  operation: 'vacuum' | 'analyze' | 'vacuum_analyze' | 'reindex'
+  full?: boolean
+}
+
+export interface MaintenanceResult {
+  success: boolean
+  operation: string
+  tables_processed: string[]
+  execution_time_ms: number
+  message: string
+}
+
+export interface BulkDeleteRequest {
+  table: string
+  ids: string[]
+  id_column?: string
+  cascade?: boolean // If true, delete related records in child tables first
+}
+
+export interface BulkUpdateRequest {
+  table: string
+  ids: string[]
+  id_column?: string
+  updates: Record<string, unknown>
+}
+
+export interface BulkOperationResult {
+  success: boolean
+  rows_affected: number
+  execution_time_ms: number
+  errors: string[]
+}
+
+export interface ImportPreviewResponse {
+  total_rows: number
+  sample_rows: Record<string, unknown>[]
+  detected_columns: string[]
+  table_columns: string[]
+  column_mapping: Record<string, string>
+  validation_errors: string[]
+  warnings: string[]
+}
+
+export interface ImportResult {
+  success: boolean
+  rows_imported: number
+  rows_updated: number
+  rows_skipped: number
+  errors: string[]
+  execution_time_ms: number
+}
+
+export interface RelatedReference {
+  direction: 'outgoing' | 'incoming'
+  table: string
+  column: string
+  referenced_table: string
+  referenced_column: string
+  row_count: number
+  preview: Record<string, unknown> | null
+  navigation_value?: string | null
+}
+
+export interface RelatedRecordsResponse {
+  table: string
+  row_id: string
+  references: RelatedReference[]
+}
+
+export interface SlowQueryItem {
+  queryid?: number
+  query_preview: string
+  calls: number
+  total_exec_time_ms: number
+  mean_exec_time_ms: number
+  min_exec_time_ms: number
+  max_exec_time_ms: number
+  stddev_exec_time_ms: number
+  rows: number
+  cache_hit_pct?: number | null
+  shared_blks_read: number
+  shared_blks_hit: number
+  temp_blks_read: number
+  temp_blks_written: number
+}
+
+export interface SlowQueriesResponse {
+  order_by: string
+  min_calls: number
+  min_mean_time_ms: number
+  count: number
+  queries: SlowQueryItem[]
+}
+
+export interface SlowQueriesParams {
+  limit?: number
+  min_calls?: number
+  min_mean_time_ms?: number
+  order_by?: 'total_exec_time' | 'mean_exec_time' | 'max_exec_time'
+}
+
+// ============================================
+// Database Admin API
+// ============================================
+
+const DB_BASE = '/api/v1/admin/db'
+
+async function dbGet<T>(endpoint: string, params?: Record<string, string | number | undefined>): Promise<T> {
+  const token = apiClient.getAccessToken()
+  const apiKey = apiClient.getApiKey()
+  const headers: HeadersInit = {
+    'Content-Type': 'application/json',
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  if (apiKey) {
+    headers['X-API-Key'] = apiKey
+  }
+
+  const searchParams = new URLSearchParams()
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) {
+        searchParams.set(key, String(value))
+      }
+    }
+  }
+  const query = searchParams.toString()
+
+  const response = await fetch(`${DB_BASE}${endpoint}${query ? `?${query}` : ''}`, {
+    method: 'GET',
+    headers,
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }))
+    throw new Error(error.detail || 'An error occurred')
+  }
+
+  return response.json()
+}
+
+async function dbPost<T>(endpoint: string, data?: unknown): Promise<T> {
+  const token = apiClient.getAccessToken()
+  const apiKey = apiClient.getApiKey()
+  const headers: HeadersInit = {
+    'Content-Type': 'application/json',
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  if (apiKey) {
+    headers['X-API-Key'] = apiKey
+  }
+
+  const response = await fetch(`${DB_BASE}${endpoint}`, {
+    method: 'POST',
+    headers,
+    body: data ? JSON.stringify(data) : undefined,
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }))
+    throw new Error(error.detail || 'An error occurred')
+  }
+
+  return response.json()
+}
+
+async function dbPostFormData<T>(endpoint: string, formData: FormData): Promise<T> {
+  const token = apiClient.getAccessToken()
+  const apiKey = apiClient.getApiKey()
+  const headers: HeadersInit = {}
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  if (apiKey) {
+    headers['X-API-Key'] = apiKey
+  }
+
+  const response = await fetch(`${DB_BASE}${endpoint}`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }))
+    const message =
+      typeof error.detail === 'string'
+        ? error.detail
+        : typeof error.error === 'string'
+          ? error.error
+          : typeof error.message === 'string'
+            ? error.message
+            : `HTTP error ${response.status}`
+    throw new Error(message)
+  }
+
+  return response.json()
+}
+
+function normalizeMaintenanceResult(
+  operation: string,
+  response: { status?: string; message?: string },
+  tables?: string[],
+  startedAt?: number,
+): MaintenanceResult {
+  return {
+    success: response.status === 'success' || response.status === 'ok',
+    operation,
+    tables_processed: tables || [],
+    execution_time_ms: startedAt ? Date.now() - startedAt : 0,
+    message: response.message || `${operation} completed`,
+  }
+}
+
+export const databaseApi = {
+  // ============================================
+  // Stats
+  // ============================================
+
+  getStats: async (): Promise<DatabaseStats> => {
+    return dbGet<DatabaseStats>('/stats')
+  },
+
+  // ============================================
+  // Tables
+  // ============================================
+
+  listTables: async (): Promise<TablesListResponse> => {
+    return dbGet<TablesListResponse>('/tables')
+  },
+
+  getTableSchema: async (tableName: string): Promise<TableSchema> => {
+    return dbGet<TableSchema>(`/tables/${tableName}/schema`)
+  },
+
+  getTableData: async (tableName: string, params: TableDataParams = {}): Promise<TableDataResponse> => {
+    // Handle filters array specially - serialize to JSON
+    const { filters, ...restParams } = params
+    const queryParams: Record<string, string | number | undefined> = { ...restParams }
+    if (filters && filters.length > 0) {
+      queryParams.filters = JSON.stringify(filters)
+    }
+    const query = buildQueryString(queryParams)
+    return dbGet<TableDataResponse>(`/tables/${tableName}/data${query}`)
+  },
+
+  // ============================================
+  // Export
+  // ============================================
+
+  exportTable: async (
+    tableName: string,
+    format: 'csv' | 'json' | 'sql' = 'csv',
+    options: { include_schema?: boolean; include_data?: boolean; limit?: number } = {},
+  ): Promise<Blob> => {
+    const token = apiClient.getAccessToken()
+    const apiKey = apiClient.getApiKey()
+    const headers: HeadersInit = {}
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`
+    }
+    if (apiKey) {
+      headers['X-API-Key'] = apiKey
+    }
+
+    const params = new URLSearchParams({ format })
+    if (options.include_schema !== undefined) params.append('include_schema', String(options.include_schema))
+    if (options.include_data !== undefined) params.append('include_data', String(options.include_data))
+    if (options.limit !== undefined) params.append('limit', String(options.limit))
+
+    const response = await fetch(`${DB_BASE}/tables/${tableName}/export?${params}`, {
+      method: 'GET',
+      headers,
+    })
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }))
+      throw new Error(error.detail || 'Export failed')
+    }
+
+    return response.blob()
+  },
+
+  // ============================================
+  // Import
+  // ============================================
+
+  previewImport: async (
+    file: File,
+    table: string,
+    format: 'csv' | 'json' | 'sql' = 'csv',
+  ): Promise<ImportPreviewResponse> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('table', table)
+    formData.append('format', format)
+    return dbPostFormData<ImportPreviewResponse>('/import/preview', formData)
+  },
+
+  executeImport: async (
+    file: File,
+    table: string,
+    format: 'csv' | 'json' | 'sql',
+    mode: 'insert' | 'upsert' | 'replace',
+    columnMapping?: Record<string, string>,
+    skipErrors?: boolean,
+  ): Promise<ImportResult> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('table', table)
+    formData.append('format', format)
+    formData.append('mode', mode)
+    if (columnMapping) {
+      formData.append('column_mapping', JSON.stringify(columnMapping))
+    }
+    if (skipErrors !== undefined) {
+      formData.append('skip_errors', String(skipErrors))
+    }
+    return dbPostFormData<ImportResult>('/import/execute', formData)
+  },
+
+  // ============================================
+  // Maintenance
+  // ============================================
+
+  vacuum: async (request: MaintenanceRequest): Promise<MaintenanceResult> => {
+    const startedAt = Date.now()
+    const response = await dbPost<{ status?: string; message?: string }>('/maintenance/vacuum', request)
+    return normalizeMaintenanceResult('vacuum', response, request.tables, startedAt)
+  },
+
+  analyze: async (request: MaintenanceRequest): Promise<MaintenanceResult> => {
+    const startedAt = Date.now()
+    const response = await dbPost<{ status?: string; message?: string }>('/maintenance/analyze', request)
+    return normalizeMaintenanceResult('analyze', response, request.tables, startedAt)
+  },
+
+  reindex: async (request: MaintenanceRequest): Promise<MaintenanceResult> => {
+    const startedAt = Date.now()
+    const response = await dbPost<{ status?: string; message?: string; tables_processed?: string[] }>(
+      '/maintenance/reindex',
+      request,
+    )
+    return normalizeMaintenanceResult('reindex', response, response.tables_processed || request.tables, startedAt)
+  },
+
+  // ============================================
+  // Orphans
+  // ============================================
+
+  findOrphans: async (): Promise<OrphansResponse> => {
+    return dbGet<OrphansResponse>('/orphans')
+  },
+
+  cleanupOrphans: async (request: OrphanCleanupRequest = {}): Promise<OrphanCleanupResponse> => {
+    const params = new URLSearchParams()
+    if (request.dry_run !== undefined) params.append('dry_run', String(request.dry_run))
+    if (request.tables) {
+      request.tables.forEach((t) => params.append('tables', t))
+    }
+    return dbPost<OrphanCleanupResponse>(`/orphans/cleanup?${params}`)
+  },
+
+  // ============================================
+  // Bulk Operations
+  // ============================================
+
+  bulkDelete: async (request: BulkDeleteRequest): Promise<BulkOperationResult> => {
+    return dbPost<BulkOperationResult>('/bulk/delete', request)
+  },
+
+  bulkUpdate: async (request: BulkUpdateRequest): Promise<BulkOperationResult> => {
+    return dbPost<BulkOperationResult>('/bulk/update', request)
+  },
+
+  // ============================================
+  // Related Records (FK Navigation)
+  // ============================================
+
+  getRelatedRecords: async (
+    tableName: string,
+    rowId: string,
+    idColumn: string = 'id',
+  ): Promise<RelatedRecordsResponse> => {
+    const params = new URLSearchParams({ id_column: idColumn })
+    return dbGet<RelatedRecordsResponse>(`/tables/${tableName}/rows/${encodeURIComponent(rowId)}/related?${params}`)
+  },
+
+  // ============================================
+  // Slow Queries
+  // ============================================
+
+  getSlowQueries: async (params: SlowQueriesParams = {}): Promise<SlowQueriesResponse> => {
+    return dbGet<SlowQueriesResponse>('/slow-queries', {
+      limit: params.limit,
+      min_calls: params.min_calls,
+      min_mean_time_ms: params.min_mean_time_ms,
+      order_by: params.order_by,
+    })
+  },
+
+  resetSlowQueries: async (): Promise<{ status: string; message: string }> => {
+    return dbPost<{ status: string; message: string }>('/slow-queries/reset')
+  },
+}

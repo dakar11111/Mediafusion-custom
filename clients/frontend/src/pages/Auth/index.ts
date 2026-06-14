@@ -1,0 +1,7 @@
+export { LoginPage } from './LoginPage'
+export { RegisterPage } from './RegisterPage'
+export { ExtensionAuthPage } from './ExtensionAuthPage'
+export { TelegramLoginPage } from './TelegramLoginPage'
+export { VerifyEmailPage } from './VerifyEmailPage'
+export { ForgotPasswordPage } from './ForgotPasswordPage'
+export { ResetPasswordPage } from './ResetPasswordPage'

@@ -1,0 +1,43 @@
+name: Deploy documentation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install docs dependencies
+        run: pip install mkdocs-material mkdocs-glightbox
+
+      - name: Build docs
+        run: mkdocs build
+
+      # Deploy to the /docs/ subdirectory of gh-pages, leaving the Kodi addon
+      # repository files at the root untouched.
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          destination_dir: docs
+          enable_jekyll: false

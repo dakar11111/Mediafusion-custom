@@ -1,0 +1,1084 @@
+import { useState, useCallback, useMemo, useEffect } from 'react'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { Switch } from '@/components/ui/switch'
+import {
+  Loader2,
+  ArrowLeft,
+  ArrowRight,
+  CheckCircle,
+  Search,
+  HardDrive,
+  Image as ImageIcon,
+  Link2,
+  Calendar,
+  FileText,
+  FileVideo,
+  Settings2,
+} from 'lucide-react'
+import { cn } from '@/lib/utils'
+import type { TorrentAnalyzeResponse, ImportResponse } from '@/lib/api'
+import { RESOLUTION_OPTIONS, type ContentType, type SportsCategory, type ImportMode } from '@/lib/constants'
+import { catalogApi } from '@/lib/api/catalog'
+import { ContentTypeSelector } from './ContentTypeSelector'
+import { TechSpecsEditor } from './TechSpecsEditor'
+import { type ExtendedMatch } from './MatchResultsGrid'
+import { MatchSearchSection } from './MatchSearchSection'
+import { CatalogSelector } from './CatalogSelector'
+import { ImportFileAnnotationDialog } from './ImportFileAnnotationDialog'
+import { ValidationWarningDialog } from './ValidationWarningDialog'
+import { MultiContentWizard } from './MultiContentWizard'
+import { DatePickerInput } from '@/components/ui/date-picker-input'
+import { ImageUrlInput } from '@/pages/MetadataCreator/components/ImageUrlInput'
+import type { FileAnnotation, TorrentDialogQueueItem, TorrentImportFormData, TorrentImportSubmitOptions } from './types'
+import { applyImportMatchToForm, fetchImportMatchByMetaId } from '../utils/importMetaLookup'
+import { useAuth } from '@/contexts/AuthContext'
+import {
+  getStoredAnonymousDisplayName,
+  normalizeAnonymousDisplayName,
+  saveAnonymousDisplayName,
+} from '@/lib/anonymousDisplayName'
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`
+}
+
+type ImportStep = 'review' | 'metadata' | 'confirm'
+
+interface TorrentImportDialogProps {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  analysis: TorrentAnalyzeResponse | null
+  magnetLink?: string // Not directly used in component but kept for parent context
+  torrentFile?: File | null // Not directly used in component but kept for parent context
+  onImport: (formData: TorrentImportFormData, options?: TorrentImportSubmitOptions) => Promise<ImportResponse>
+  onReanalyze?: (contentType: ContentType) => void
+  isImporting?: boolean
+  initialContentType?: ContentType // Content type selected before analysis
+  importMode?: ImportMode // Import mode for multi-content support
+  onImportModeChange?: (mode: ImportMode) => void
+  currentIndex?: number
+  totalItems?: number
+  queueItems?: TorrentDialogQueueItem[]
+  prefillData?: Partial<TorrentImportFormData>
+  imageUploadEnabled?: boolean
+}
+
+export function TorrentImportDialog({
+  open,
+  onOpenChange,
+  analysis,
+  magnetLink: _magnetLink,
+  initialContentType = 'movie',
+  torrentFile: _torrentFile,
+  onImport,
+  onReanalyze,
+  isImporting = false,
+  importMode = 'single',
+  onImportModeChange,
+  currentIndex,
+  totalItems = 1,
+  queueItems = [],
+  prefillData,
+  imageUploadEnabled = false,
+}: TorrentImportDialogProps) {
+  const normalizeResolutionValue = useCallback((value?: string | null): string | undefined => {
+    if (!value) return undefined
+    const normalized = value.trim()
+    if (!normalized) return undefined
+
+    const exact = RESOLUTION_OPTIONS.find((option) => option.value === normalized)
+    if (exact) return exact.value
+
+    const lower = normalized.toLowerCase()
+    const caseInsensitive = RESOLUTION_OPTIONS.find((option) => option.value.toLowerCase() === lower)
+    if (caseInsensitive) return caseInsensitive.value
+
+    if (lower === '4k' || lower.includes('2160')) {
+      return '4K'
+    }
+    return undefined
+  }, [])
+
+  const { user } = useAuth()
+  // Note: magnetLink and torrentFile props are kept for parent context but handled there
+  void _magnetLink
+  void _torrentFile
+
+  // Check if we're in multi-content mode
+  const isMultiContentMode = importMode === 'collection' || importMode === 'pack'
+
+  // Step management
+  const [currentStep, setCurrentStep] = useState<ImportStep>('review')
+
+  // Form state - initialize contentType from initial prop
+  const [contentType, setContentType] = useState<ContentType>(initialContentType)
+  const [sportsCategory, setSportsCategory] = useState<SportsCategory | undefined>()
+  const [selectedMatchIndex, setSelectedMatchIndex] = useState<number | null>(null)
+  const [activeMatch, setActiveMatch] = useState<ExtendedMatch | null>(null)
+  const [isResolvingMetaId, setIsResolvingMetaId] = useState(false)
+
+  // Metadata
+  const [metaId, setMetaId] = useState('')
+  const [title, setTitle] = useState('')
+  const [poster, setPoster] = useState('')
+  const [background, setBackground] = useState('')
+  const [releaseDate, setReleaseDate] = useState('')
+
+  // Tech specs
+  const [resolution, setResolution] = useState<string | undefined>()
+  const [quality, setQuality] = useState<string | undefined>()
+  const [codec, setCodec] = useState<string | undefined>()
+  const [audio, setAudio] = useState<string[]>([])
+  const [hdr, setHdr] = useState<string[]>([])
+  const [languages, setLanguages] = useState<string[]>([])
+
+  // Catalogs
+  const [selectedCatalogs, setSelectedCatalogs] = useState<string[]>([])
+
+  // Series-specific
+  const [episodeParser, setEpisodeParser] = useState('')
+  const [fileAnnotations, setFileAnnotations] = useState<FileAnnotation[]>([])
+
+  // Import options
+  const [forceImport, setForceImport] = useState(false)
+  const [addTitleToPoster, setAddTitleToPoster] = useState(false)
+  const [isAnonymous, setIsAnonymous] = useState(user?.contribute_anonymously ?? false)
+  const [anonymousDisplayName, setAnonymousDisplayName] = useState(getStoredAnonymousDisplayName())
+  const [applyToSelected, setApplyToSelected] = useState(false)
+  const [selectedQueueIndices, setSelectedQueueIndices] = useState<number[]>([])
+
+  // Dialog states
+  const [annotationDialogOpen, setAnnotationDialogOpen] = useState(false)
+  const [validationDialogOpen, setValidationDialogOpen] = useState(false)
+  const [validationErrors, setValidationErrors] = useState<Array<{ type: string; message: string }>>([])
+  const [selectedEpisodeReleaseByNumber, setSelectedEpisodeReleaseByNumber] = useState<Record<number, string>>({})
+
+  // Derive selected match from active selection or analyze index
+  const selectedMatch = useMemo(() => {
+    if (activeMatch) return activeMatch
+    if (selectedMatchIndex === null || !analysis?.matches) return null
+    return analysis.matches[selectedMatchIndex] as ExtendedMatch | null
+  }, [activeMatch, selectedMatchIndex, analysis?.matches])
+  const sportsSearchType = useMemo<'movie' | 'series'>(
+    () => (sportsCategory === 'formula_racing' || sportsCategory === 'motogp_racing' ? 'series' : 'movie'),
+    [sportsCategory],
+  )
+  const matchLookupType = useMemo<'movie' | 'series'>(
+    () => (contentType === 'sports' ? sportsSearchType : contentType === 'tv' ? 'movie' : contentType),
+    [contentType, sportsSearchType],
+  )
+  const annotationFilesWithExistingDates = useMemo(() => {
+    if (!analysis?.files || analysis.files.length === 0) return analysis?.files || []
+    if (contentType !== 'sports') return analysis.files
+    if (Object.keys(selectedEpisodeReleaseByNumber).length === 0) return analysis.files
+
+    return analysis.files.map((file) => {
+      const releaseDate = file.episode_number ? selectedEpisodeReleaseByNumber[file.episode_number] : undefined
+      if (!releaseDate) return file
+      return { ...file, release_date: releaseDate }
+    })
+  }, [analysis, contentType, selectedEpisodeReleaseByNumber])
+
+  const selectableQueueItems = useMemo(() => {
+    if (typeof currentIndex !== 'number') return []
+    return queueItems.filter((item) => item.index > currentIndex)
+  }, [queueItems, currentIndex])
+
+  // Initialize from analysis when dialog opens (during render, not in effect)
+  const [prevOpen, setPrevOpen] = useState(open)
+  const [prevAnalysis, setPrevAnalysis] = useState(analysis)
+  if (!open && prevOpen) {
+    setPrevOpen(false)
+  }
+  if (analysis && open && (!prevOpen || prevAnalysis !== analysis)) {
+    const prefills = prefillData || {}
+    const resolvedContentType = prefills.contentType || initialContentType
+    const analysisCreatedDate = analysis.created_at?.slice(0, 10)
+    const hasExistingSportsMatches = resolvedContentType === 'sports' && (analysis.matches?.length || 0) > 0
+    setPrevOpen(open)
+    setPrevAnalysis(analysis)
+    setContentType(resolvedContentType)
+    const detectedSportsCategory =
+      resolvedContentType === 'sports' ? (analysis.sports_category as SportsCategory | undefined) : undefined
+    setSportsCategory(prefills.sportsCategory || detectedSportsCategory)
+    setResolution(normalizeResolutionValue(prefills.resolution || analysis.resolution))
+    setQuality(prefills.quality || analysis.quality)
+    setCodec(prefills.codec || analysis.codec)
+    setAudio(prefills.audio || analysis.audio || [])
+    setHdr(prefills.hdr || analysis.hdr || [])
+    setLanguages(prefills.languages || analysis.languages || [])
+    const defaultSportsCatalogs = detectedSportsCategory ? [detectedSportsCategory] : []
+    setSelectedCatalogs(prefills.catalogs || defaultSportsCatalogs)
+    setEpisodeParser(prefills.episodeNameParser || '')
+    setForceImport(prefills.forceImport ?? false)
+    setIsAnonymous(prefills.isAnonymous ?? user?.contribute_anonymously ?? false)
+    setAnonymousDisplayName(prefills.anonymousDisplayName || getStoredAnonymousDisplayName())
+    // Auto-populate file annotations from DHT-resolved data when no prefills provided
+    if (prefills.fileData) {
+      setFileAnnotations(prefills.fileData)
+    } else if (analysis.resolved?.files) {
+      const VIDEO_EXTS = /\.(mkv|mp4|avi|mov|wmv|m4v|ts|m2ts|webm|flv|divx|xvid)$/i
+      setFileAnnotations(
+        analysis.resolved.files
+          .filter((f) => VIDEO_EXTS.test(f.path))
+          .map((f, idx) => ({
+            index: idx,
+            filename: f.path.split('/').pop() ?? f.path,
+            size: f.size,
+            season_number: null,
+            episode_number: null,
+            included: true,
+          })),
+      )
+    } else {
+      setFileAnnotations([])
+    }
+    setPoster(prefills.poster || '')
+    setBackground(prefills.background || '')
+    setReleaseDate(
+      prefills.releaseDate ||
+        (resolvedContentType === 'sports' && !hasExistingSportsMatches ? analysisCreatedDate || '' : ''),
+    )
+    setMetaId(prefills.metaId || '')
+    setTitle(prefills.title || analysis.parsed_title || analysis.torrent_name || '')
+    setApplyToSelected(false)
+    setSelectedQueueIndices([])
+    setActiveMatch(null)
+
+    if (analysis.matches && analysis.matches.length > 0) {
+      const firstMatch = analysis.matches[0] as ExtendedMatch
+      const shouldAutoSelectMatch = resolvedContentType !== 'sports'
+      if (shouldAutoSelectMatch) {
+        setSelectedMatchIndex(0)
+        setActiveMatch(firstMatch)
+        if (!prefills.metaId) setMetaId(firstMatch.imdb_id || firstMatch.id)
+        if (!prefills.title) setTitle(firstMatch.title)
+        if (!prefills.poster && firstMatch.poster) setPoster(firstMatch.poster)
+        if (!prefills.background && firstMatch.background) setBackground(firstMatch.background)
+        if (!prefills.releaseDate && firstMatch.release_date) {
+          setReleaseDate(firstMatch.release_date)
+        }
+      } else {
+        setSelectedMatchIndex(null)
+        setActiveMatch(null)
+      }
+    } else {
+      setSelectedMatchIndex(null)
+      setActiveMatch(null)
+    }
+
+    setCurrentStep('review')
+  }
+
+  const applyMatchMetadata = useCallback((match: ExtendedMatch) => {
+    applyImportMatchToForm(match, {
+      setMetaId,
+      setTitle,
+      setPoster,
+      setBackground,
+      setReleaseDate,
+    })
+  }, [])
+
+  // Handle match selection
+  const handleMatchSelect = useCallback(
+    (match: ExtendedMatch, index: number) => {
+      // Allow toggling off a selected match.
+      if (activeMatch?.id === match.id && selectedMatchIndex === index) {
+        setSelectedMatchIndex(null)
+        setActiveMatch(null)
+        setSelectedEpisodeReleaseByNumber({})
+        setPoster('')
+        setBackground('')
+        setReleaseDate('')
+        return
+      }
+      setSelectedMatchIndex(index)
+      setActiveMatch(match)
+      applyMatchMetadata(match)
+    },
+    [activeMatch, selectedMatchIndex, applyMatchMetadata],
+  )
+
+  useEffect(() => {
+    let cancelled = false
+
+    const loadSelectedMatchEpisodeDetails = async () => {
+      if (contentType !== 'sports' || !selectedMatch || selectedMatch.type !== 'series' || !selectedMatch.media_id) {
+        setSelectedEpisodeReleaseByNumber({})
+        return
+      }
+
+      try {
+        const detail = await catalogApi.getCatalogItem('series', selectedMatch.media_id)
+        if (cancelled) return
+
+        const releaseByEpisode: Record<number, string> = {}
+        for (const season of detail.seasons || []) {
+          for (const episode of season.episodes || []) {
+            if (typeof episode.episode_number === 'number' && episode.released) {
+              releaseByEpisode[episode.episode_number] = episode.released
+            }
+          }
+        }
+        setSelectedEpisodeReleaseByNumber(releaseByEpisode)
+
+        if (!poster && detail.poster) setPoster(detail.poster)
+      } catch {
+        if (!cancelled) {
+          setSelectedEpisodeReleaseByNumber({})
+        }
+      }
+    }
+
+    void loadSelectedMatchEpisodeDetails()
+    return () => {
+      cancelled = true
+    }
+  }, [contentType, selectedMatch, poster])
+
+  // Handle tech spec changes
+  const handleTechSpecChange = useCallback((field: string, value: string | string[] | undefined) => {
+    switch (field) {
+      case 'resolution':
+        setResolution(value as string | undefined)
+        break
+      case 'quality':
+        setQuality(value as string | undefined)
+        break
+      case 'codec':
+        setCodec(value as string | undefined)
+        break
+      case 'audio':
+        setAudio((value as string[]) ?? [])
+        break
+      case 'hdr':
+        setHdr((value as string[]) ?? [])
+        break
+      case 'languages':
+        setLanguages((value as string[]) ?? [])
+        break
+    }
+  }, [])
+
+  // Navigate steps
+  const goToStep = useCallback((step: ImportStep) => {
+    setCurrentStep(step)
+  }, [])
+
+  const goBack = useCallback(() => {
+    if (currentStep === 'metadata') {
+      goToStep('review')
+    } else if (currentStep === 'confirm') {
+      goToStep('metadata')
+    }
+  }, [currentStep, goToStep])
+
+  const goForward = useCallback(async () => {
+    if (currentStep === 'review') {
+      const trimmedMetaId = metaId.trim()
+      const needsMetaLookup = trimmedMetaId && !title.trim() && !activeMatch
+      if (needsMetaLookup) {
+        setIsResolvingMetaId(true)
+        try {
+          const match = await fetchImportMatchByMetaId(trimmedMetaId, matchLookupType)
+          setActiveMatch(match)
+          applyMatchMetadata(match)
+        } catch {
+          // Manual lookup in MatchSearchSection handles explicit errors; allow manual metadata entry.
+        } finally {
+          setIsResolvingMetaId(false)
+        }
+      }
+      goToStep('metadata')
+    } else if (currentStep === 'metadata') {
+      goToStep('confirm')
+    }
+  }, [currentStep, goToStep, metaId, title, activeMatch, matchLookupType, applyMatchMetadata])
+
+  // Handle file annotation confirm
+  const handleAnnotationConfirm = useCallback((files: FileAnnotation[]) => {
+    setFileAnnotations(files)
+    setAnnotationDialogOpen(false)
+  }, [])
+
+  // Build import form data
+  const buildFormData = useCallback((): TorrentImportFormData => {
+    return {
+      contentType,
+      sportsCategory,
+      metaId: metaId || undefined,
+      title: title || undefined,
+      poster: poster || undefined,
+      background: background || undefined,
+      resolution: resolution || undefined,
+      quality: quality || undefined,
+      codec: codec || undefined,
+      audio: audio.length > 0 ? audio : undefined,
+      hdr: hdr.length > 0 ? hdr : undefined,
+      languages: languages.length > 0 ? languages : undefined,
+      catalogs: selectedCatalogs.length > 0 ? selectedCatalogs : undefined,
+      episodeNameParser: contentType === 'series' ? episodeParser || undefined : undefined,
+      releaseDate: releaseDate || undefined,
+      forceImport,
+      isAnonymous,
+      anonymousDisplayName: isAnonymous ? normalizeAnonymousDisplayName(anonymousDisplayName) : undefined,
+      fileData: contentType === 'series' && fileAnnotations.length > 0 ? fileAnnotations : undefined,
+    }
+  }, [
+    contentType,
+    sportsCategory,
+    metaId,
+    title,
+    poster,
+    background,
+    resolution,
+    quality,
+    codec,
+    audio,
+    hdr,
+    languages,
+    selectedCatalogs,
+    episodeParser,
+    releaseDate,
+    forceImport,
+    isAnonymous,
+    anonymousDisplayName,
+    fileAnnotations,
+  ])
+
+  // Handle import
+  const handleImport = useCallback(async () => {
+    const formData = buildFormData()
+    const importOptions: TorrentImportSubmitOptions | undefined = applyToSelected
+      ? { selectedQueueIndices: selectedQueueIndices }
+      : undefined
+
+    try {
+      const result = await onImport(formData, importOptions)
+
+      if (result.status === 'validation_failed') {
+        // Show validation warning dialog
+        setValidationErrors(result.errors || [{ type: 'unknown', message: result.message }])
+        setValidationDialogOpen(true)
+      } else if (result.status === 'needs_annotation' && contentType === 'series') {
+        // Open annotation dialog
+        setAnnotationDialogOpen(true)
+      }
+      // Success/error handled by parent
+    } catch (error) {
+      console.error('Import failed:', error)
+    }
+  }, [buildFormData, onImport, applyToSelected, selectedQueueIndices, contentType])
+
+  // Handle force import from validation dialog
+  const handleForceImport = useCallback(async () => {
+    setValidationDialogOpen(false)
+    setForceImport(true)
+    // Trigger import with force flag
+    const formData = { ...buildFormData(), forceImport: true }
+    const importOptions: TorrentImportSubmitOptions | undefined = applyToSelected
+      ? { selectedQueueIndices: selectedQueueIndices }
+      : undefined
+    await onImport(formData, importOptions)
+  }, [buildFormData, onImport, applyToSelected, selectedQueueIndices])
+
+  // Handle re-analyze from validation dialog
+  const handleReanalyze = useCallback(() => {
+    setValidationDialogOpen(false)
+    if (onReanalyze) {
+      onReanalyze(contentType)
+    }
+  }, [contentType, onReanalyze])
+
+  // Handle multi-content wizard completion
+  const handleMultiContentComplete = useCallback(
+    async (annotations: FileAnnotation[]) => {
+      // Build form data with multi-content annotations
+      const formData: TorrentImportFormData = {
+        contentType,
+        sportsCategory,
+        // For multi-content, we don't set a single metaId - each file has its own
+        title: title || analysis?.parsed_title || undefined,
+        poster: poster || undefined,
+        background: background || undefined,
+        resolution: resolution || undefined,
+        quality: quality || undefined,
+        codec: codec || undefined,
+        audio: audio.length > 0 ? audio : undefined,
+        hdr: hdr.length > 0 ? hdr : undefined,
+        languages: languages.length > 0 ? languages : undefined,
+        catalogs: selectedCatalogs.length > 0 ? selectedCatalogs : undefined,
+        forceImport,
+        isAnonymous,
+        anonymousDisplayName: isAnonymous ? normalizeAnonymousDisplayName(anonymousDisplayName) : undefined,
+        fileData: annotations,
+      }
+
+      try {
+        await onImport(formData)
+      } catch (error) {
+        console.error('Multi-content import failed:', error)
+      }
+    },
+    [
+      contentType,
+      sportsCategory,
+      title,
+      poster,
+      background,
+      resolution,
+      quality,
+      codec,
+      audio,
+      hdr,
+      languages,
+      selectedCatalogs,
+      forceImport,
+      isAnonymous,
+      anonymousDisplayName,
+      onImport,
+      analysis,
+    ],
+  )
+
+  // Check if series needs annotation
+  const needsAnnotation = useMemo(() => {
+    return contentType === 'series' && !!analysis?.files && analysis.files.length > 0
+  }, [contentType, analysis])
+  const canProceedWithoutExternalMetadata = contentType === 'sports' && !!sportsCategory
+  const canProceed = canProceedWithoutExternalMetadata || !!selectedMatch || !!metaId
+
+  // Step indicator
+  const steps = [
+    { id: 'review', label: 'Review', icon: Search },
+    { id: 'metadata', label: 'Metadata', icon: Settings2 },
+    { id: 'confirm', label: 'Confirm', icon: CheckCircle },
+  ]
+
+  if (!analysis) return null
+
+  // If in multi-content mode, show the wizard instead
+  if (isMultiContentMode) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent
+          scrollMode="contained"
+          className="sm:max-w-[900px] max-h-[85vh] min-h-0 flex flex-col p-0 gap-0 overflow-hidden"
+        >
+          <MultiContentWizard
+            analysis={analysis}
+            importMode={importMode}
+            onComplete={handleMultiContentComplete}
+            onCancel={() => onOpenChange(false)}
+            isImporting={isImporting}
+          />
+        </DialogContent>
+      </Dialog>
+    )
+  }
+
+  return (
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent
+          scrollMode="contained"
+          className="sm:max-w-[900px] max-h-[85vh] min-h-0 flex flex-col p-0 gap-0 overflow-hidden"
+        >
+          {/* Header */}
+          <DialogHeader className="px-6 pt-6 pb-4 border-b flex-shrink-0">
+            <DialogTitle className="flex items-center gap-2">
+              <HardDrive className="h-5 w-5 text-primary" />
+              Import Torrent
+              {totalItems > 1 && typeof currentIndex === 'number' && (
+                <span className="ml-auto rounded-md bg-muted px-2 py-0.5 text-xs font-normal text-muted-foreground">
+                  Torrent {currentIndex + 1} of {totalItems}
+                </span>
+              )}
+            </DialogTitle>
+            <DialogDescription asChild>
+              <div className="space-y-1">
+                <p className="font-mono text-xs bg-muted/50 p-2 rounded-md break-all text-foreground/80">
+                  {analysis.torrent_name || 'Unknown torrent'}
+                </p>
+                {analysis.parsed_title && analysis.parsed_title !== analysis.torrent_name && (
+                  <p className="text-xs text-muted-foreground">
+                    Detected: <span className="font-medium">{analysis.parsed_title}</span>
+                    {analysis.year && ` (${analysis.year})`}
+                  </p>
+                )}
+              </div>
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* Step Indicator */}
+          <div className="px-6 py-3 border-b bg-muted/30 flex-shrink-0">
+            <div className="flex items-center justify-center gap-2">
+              {steps.map((step, index) => {
+                const Icon = step.icon
+                const isActive = currentStep === step.id
+                const isPast = steps.findIndex((s) => s.id === currentStep) > index
+
+                return (
+                  <div key={step.id} className="flex items-center">
+                    {index > 0 && (
+                      <div className={cn('w-8 h-0.5 mx-1', isPast ? 'bg-primary' : 'bg-muted-foreground/20')} />
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className={cn('gap-1.5 h-8', isActive && 'bg-primary/10 text-primary', isPast && 'text-primary')}
+                      onClick={() => goToStep(step.id as ImportStep)}
+                    >
+                      <Icon className={cn('h-3.5 w-3.5', isPast && 'text-primary')} />
+                      <span className="text-xs">{step.label}</span>
+                    </Button>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* Content */}
+          <ScrollArea className="flex-1 min-h-0">
+            <div className="p-6">
+              {/* Step 1: Review */}
+              {currentStep === 'review' && (
+                <div className="space-y-6">
+                  {/* Torrent Info Summary */}
+                  <div className="p-4 rounded-xl bg-muted/50">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                      <div>
+                        <Label className="text-xs text-muted-foreground">Size</Label>
+                        <p className="font-medium">
+                          {analysis.total_size_readable ||
+                            (analysis.resolved?.total_size ? formatBytes(analysis.resolved.total_size) : 'Unknown')}
+                        </p>
+                      </div>
+                      <div>
+                        <Label className="text-xs text-muted-foreground">Files</Label>
+                        <p className="font-medium">{analysis.file_count || analysis.resolved?.num_files || 0}</p>
+                      </div>
+                      <div>
+                        <Label className="text-xs text-muted-foreground">Quality</Label>
+                        <p className="font-medium">
+                          {[analysis.resolution, analysis.quality].filter(Boolean).join(' ') || 'Unknown'}
+                        </p>
+                      </div>
+                      <div>
+                        <Label className="text-xs text-muted-foreground">Hash</Label>
+                        <p className="font-mono text-xs truncate">{analysis.info_hash || 'N/A'}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Content Type Selection */}
+                  <ContentTypeSelector
+                    value={contentType}
+                    sportsCategory={sportsCategory}
+                    importMode={importMode}
+                    onChange={(newType) => {
+                      setContentType(newType)
+                      // Clear selected match when content type changes
+                      setSelectedMatchIndex(null)
+                      setMetaId('')
+                      setPoster('')
+                      setBackground('')
+                      if (newType !== 'series') {
+                        // Sports/movie flows do not require episode parser or manual episode annotations.
+                        setEpisodeParser('')
+                        setFileAnnotations([])
+                      }
+                      // Reset import mode when content type changes
+                      if (onImportModeChange) {
+                        onImportModeChange('single')
+                      }
+                      // Trigger re-analysis with new content type
+                      if (onReanalyze && newType !== contentType) {
+                        onReanalyze(newType)
+                      }
+                    }}
+                    onSportsCategoryChange={(newCategory) => {
+                      setSportsCategory(newCategory)
+                      // Keep sports catalog aligned with chosen sport by default.
+                      setSelectedCatalogs([newCategory])
+                    }}
+                    onImportModeChange={onImportModeChange}
+                    showImportMode={contentType !== 'sports'}
+                  />
+
+                  {/* Match Results with Search */}
+                  {contentType === 'sports' && (
+                    <div className="space-y-3 rounded-xl border border-primary/20 bg-primary/5 p-3">
+                      <p className="text-sm font-medium">Sports title parser detected event metadata</p>
+                      <p className="text-xs text-muted-foreground">
+                        Category: <span className="font-medium">{sportsCategory || 'Not detected'}</span>
+                        {analysis.sports_event ? ` | Event: ${analysis.sports_event}` : ''}
+                        {analysis.sports_league ? ` | League: ${analysis.sports_league}` : ''}
+                      </p>
+                    </div>
+                  )}
+                  <MatchSearchSection
+                    initialMatches={(analysis.matches || []) as ExtendedMatch[]}
+                    selectedIndex={selectedMatchIndex}
+                    selectedMatch={selectedMatch}
+                    onSelectMatch={handleMatchSelect}
+                    metaId={metaId}
+                    onMetaIdChange={setMetaId}
+                    contentType={
+                      contentType === 'sports' ? sportsSearchType : contentType === 'tv' ? 'movie' : contentType
+                    }
+                    initialYear={analysis.year}
+                  />
+                </div>
+              )}
+
+              {/* Step 2: Metadata */}
+              {currentStep === 'metadata' && (
+                <div className="space-y-6">
+                  {/* Basic Metadata */}
+                  <div className="space-y-4">
+                    <Label className="text-sm font-medium">Basic Information</Label>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label className="text-xs text-muted-foreground flex items-center gap-1.5">
+                          <Link2 className="h-3 w-3" />
+                          IMDb/Meta ID
+                        </Label>
+                        <Input
+                          value={metaId}
+                          onChange={(e) => setMetaId(e.target.value)}
+                          placeholder="tt1234567"
+                          className="rounded-lg"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs text-muted-foreground flex items-center gap-1.5">
+                          <FileText className="h-3 w-3" />
+                          Title
+                        </Label>
+                        <Input
+                          value={title}
+                          onChange={(e) => setTitle(e.target.value)}
+                          placeholder="Movie/Series title"
+                          className="rounded-lg"
+                        />
+                      </div>
+                      <ImageUrlInput
+                        label="Poster URL"
+                        value={poster}
+                        onChange={setPoster}
+                        aspectRatio="poster"
+                        allowUpload={imageUploadEnabled}
+                      />
+                      <ImageUrlInput
+                        label="Background URL"
+                        value={background}
+                        onChange={setBackground}
+                        aspectRatio="backdrop"
+                        allowUpload={imageUploadEnabled}
+                      />
+                      <div className="space-y-2">
+                        <Label className="text-xs text-muted-foreground flex items-center gap-1.5">
+                          <Calendar className="h-3 w-3" />
+                          Release Date
+                        </Label>
+                        <DatePickerInput value={releaseDate} onChange={setReleaseDate} className="h-10" />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Technical Specs */}
+                  <div className="space-y-3">
+                    <Label className="text-sm font-medium">Technical Specifications</Label>
+                    <TechSpecsEditor
+                      resolution={resolution}
+                      quality={quality}
+                      codec={codec}
+                      audio={audio}
+                      hdr={hdr}
+                      languages={languages}
+                      extraLanguages={analysis.languages || []}
+                      onChange={handleTechSpecChange}
+                    />
+                  </div>
+
+                  {/* Catalogs */}
+                  <CatalogSelector
+                    contentType={contentType}
+                    selectedCatalogs={selectedCatalogs}
+                    onChange={setSelectedCatalogs}
+                    quality={quality}
+                  />
+
+                  {/* Series Options */}
+                  {contentType === 'series' && (
+                    <div className="space-y-4 pt-4 border-t">
+                      <Label className="text-sm font-medium">Episode Options</Label>
+
+                      {/* Episode Parser */}
+                      <div className="space-y-2">
+                        <Label className="text-xs text-muted-foreground">Episode Name Parser (regex pattern)</Label>
+                        <Input
+                          value={episodeParser}
+                          onChange={(e) => setEpisodeParser(e.target.value)}
+                          placeholder="Optional: S(\d+)E(\d+)"
+                          className="rounded-lg font-mono text-sm"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Leave empty to use default parser or annotate files manually
+                        </p>
+                      </div>
+
+                      {/* File Annotation Button */}
+                      {needsAnnotation && (
+                        <Button variant="outline" onClick={() => setAnnotationDialogOpen(true)} className="w-full">
+                          <FileVideo className="h-4 w-4 mr-2" />
+                          Annotate Episode Files ({fileAnnotations.length || analysis.files?.length || 0})
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Step 3: Confirm */}
+              {currentStep === 'confirm' && (
+                <div className="space-y-6">
+                  <div className="p-4 rounded-xl bg-muted/50">
+                    <h3 className="font-medium mb-4">Import Summary</h3>
+                    <div className="grid gap-3 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Content Type</span>
+                        <span className="font-medium capitalize">{contentType}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Title</span>
+                        <span className="font-medium">{title || 'Not set'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">IMDb ID</span>
+                        <span className="font-mono text-xs">{metaId || 'Not set'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Quality</span>
+                        <span className="font-medium">
+                          {[resolution, quality].filter(Boolean).join(' ') || 'Not set'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Catalogs</span>
+                        <span className="font-medium">
+                          {selectedCatalogs.length > 0 ? `${selectedCatalogs.length} selected` : 'Default'}
+                        </span>
+                      </div>
+                      {needsAnnotation && (
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Files Annotated</span>
+                          <span className="font-medium">
+                            {fileAnnotations.length > 0 ? `${fileAnnotations.length} files` : 'Using auto-parser'}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Options */}
+                  <div className="space-y-3">
+                    <Label className="text-sm font-medium">Options</Label>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between p-3 rounded-lg bg-muted/30">
+                        <div className="flex items-center gap-2">
+                          <ImageIcon className="h-4 w-4 text-muted-foreground" />
+                          <span className="text-sm">Add title to poster</span>
+                        </div>
+                        <Switch checked={addTitleToPoster} onCheckedChange={setAddTitleToPoster} />
+                      </div>
+                      <div className="flex items-center justify-between p-3 rounded-lg bg-muted/30">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm">Anonymous contribution</span>
+                          </div>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {isAnonymous
+                              ? 'Uploader will use your anonymous display name'
+                              : 'Your username will be linked to this contribution'}
+                          </p>
+                        </div>
+                        <Switch checked={isAnonymous} onCheckedChange={setIsAnonymous} />
+                      </div>
+                      {isAnonymous && (
+                        <div className="p-3 rounded-lg bg-muted/20 space-y-2">
+                          <Label htmlFor="torrent-anonymous-display-name" className="text-sm">
+                            Anonymous display name (optional)
+                          </Label>
+                          <Input
+                            id="torrent-anonymous-display-name"
+                            value={anonymousDisplayName}
+                            onChange={(e) => {
+                              setAnonymousDisplayName(e.target.value)
+                              saveAnonymousDisplayName(e.target.value)
+                            }}
+                            maxLength={32}
+                            placeholder='Defaults to "Anonymous"'
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {selectableQueueItems.length > 0 && (
+                    <div className="space-y-3">
+                      <Label className="text-sm font-medium">Apply Metadata To Selected Torrents</Label>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between rounded-lg bg-muted/30 p-3">
+                          <div>
+                            <p className="text-sm font-medium">Apply this form to selected queue items</p>
+                            <p className="text-xs text-muted-foreground">
+                              Selected torrents will open with these values prefilled.
+                            </p>
+                          </div>
+                          <Switch
+                            checked={applyToSelected}
+                            onCheckedChange={(checked) => {
+                              const enabled = checked === true
+                              setApplyToSelected(enabled)
+                              if (!enabled) {
+                                setSelectedQueueIndices([])
+                              }
+                            }}
+                          />
+                        </div>
+
+                        {applyToSelected && (
+                          <div className="max-h-40 space-y-2 overflow-auto rounded-lg border bg-muted/10 p-3">
+                            {selectableQueueItems.map((item) => (
+                              <div key={item.index} className="flex items-center gap-2">
+                                <Checkbox
+                                  id={`queue-item-${item.index}`}
+                                  checked={selectedQueueIndices.includes(item.index)}
+                                  onCheckedChange={(checked) => {
+                                    const isChecked = checked === true
+                                    setSelectedQueueIndices((prev) => {
+                                      if (isChecked) {
+                                        return [...prev, item.index].sort((a, b) => a - b)
+                                      }
+                                      return prev.filter((idx) => idx !== item.index)
+                                    })
+                                  }}
+                                />
+                                <Label
+                                  htmlFor={`queue-item-${item.index}`}
+                                  className="cursor-pointer text-sm font-normal"
+                                >
+                                  {item.label}
+                                </Label>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </ScrollArea>
+
+          {/* Footer */}
+          <div className="px-6 py-4 border-t bg-muted/30 flex-shrink-0">
+            <div className="flex items-center justify-between">
+              <Button
+                variant="outline"
+                onClick={goBack}
+                disabled={currentStep === 'review' || isImporting}
+                className="rounded-lg"
+              >
+                <ArrowLeft className="h-4 w-4 mr-2" />
+                Back
+              </Button>
+
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isImporting}>
+                  Cancel
+                </Button>
+
+                {currentStep !== 'confirm' ? (
+                  <Button
+                    onClick={() => void goForward()}
+                    disabled={!canProceed || isResolvingMetaId}
+                    className="bg-gradient-to-r from-primary to-primary/80"
+                  >
+                    {isResolvingMetaId ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        Fetching metadata...
+                      </>
+                    ) : (
+                      <>
+                        Next
+                        <ArrowRight className="h-4 w-4 ml-2" />
+                      </>
+                    )}
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={handleImport}
+                    disabled={isImporting || !canProceed}
+                    className="bg-gradient-to-r from-primary to-primary/80"
+                  >
+                    {isImporting ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        Importing...
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle className="h-4 w-4 mr-2" />
+                        Import
+                      </>
+                    )}
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* File Annotation Dialog */}
+      <ImportFileAnnotationDialog
+        open={annotationDialogOpen}
+        onOpenChange={setAnnotationDialogOpen}
+        torrentName={analysis.torrent_name || analysis.parsed_title || 'Unknown'}
+        files={annotationFilesWithExistingDates}
+        isSports={contentType === 'sports'}
+        defaultReleaseDate={
+          releaseDate || ((analysis.matches?.length || 0) === 0 ? analysis.created_at?.slice(0, 10) : undefined)
+        }
+        onConfirm={handleAnnotationConfirm}
+        allowMultiContent={contentType === 'movie' || contentType === 'series'}
+        defaultMetaType={contentType === 'series' ? 'series' : 'movie'}
+      />
+
+      {/* Validation Warning Dialog */}
+      <ValidationWarningDialog
+        open={validationDialogOpen}
+        onOpenChange={setValidationDialogOpen}
+        errors={validationErrors}
+        onCancel={() => setValidationDialogOpen(false)}
+        onReanalyze={handleReanalyze}
+        onForceImport={handleForceImport}
+      />
+    </>
+  )
+}

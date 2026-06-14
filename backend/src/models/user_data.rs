@@ -1,0 +1,892 @@
+use std::collections::HashSet;
+
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
+
+use crate::parser::constants::{
+    default_hdr_filter_vec, default_language_sorting_values, default_quality_filter_groups,
+    default_resolutions_vec, expand_quality_filter,
+};
+
+/// Mirrors Python's `SortingOption` (schema/config.py).
+/// Stored in `torrent_sorting_priority` as `{"k": "resolution", "d": "desc"}`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SortingOption {
+    #[serde(rename = "k", alias = "key")]
+    pub key: String,
+    #[serde(default = "default_sort_direction", rename = "d", alias = "direction")]
+    pub direction: String,
+}
+
+fn default_sort_direction() -> String {
+    "desc".to_string()
+}
+
+fn default_torrent_sorting_priority() -> Vec<Value> {
+    const KEYS: &[&str] = &[
+        "cached",
+        "resolution",
+        "quality",
+        "language",
+        "size",
+        "seeders",
+        "created_at",
+    ];
+    KEYS.iter()
+        .map(|k| serde_json::json!({"k": k, "d": "desc"}))
+        .collect()
+}
+
+fn default_language_sorting() -> Vec<Value> {
+    default_language_sorting_values()
+}
+
+fn default_selected_resolutions() -> Vec<Option<String>> {
+    default_resolutions_vec()
+}
+
+fn default_hdr_filter() -> Vec<String> {
+    default_hdr_filter_vec()
+}
+
+fn default_max_size() -> f64 {
+    f64::INFINITY
+}
+
+fn default_min_size() -> i64 {
+    0
+}
+
+fn deserialize_max_size<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = Value::deserialize(deserializer)?;
+    parse_max_size_value(&v).ok_or_else(|| serde::de::Error::custom("Invalid max_size"))
+}
+
+fn parse_max_size_value(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) if s == "inf" => Some(f64::INFINITY),
+        Value::String(s) => s.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn deserialize_min_size<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = Value::deserialize(deserializer)?;
+    Ok(parse_min_size_value(&v))
+}
+
+fn parse_min_size_value(v: &Value) -> i64 {
+    match v {
+        Value::Number(n) => n.as_i64().unwrap_or(0).max(0),
+        Value::String(s) => s.parse::<i64>().unwrap_or(0).max(0),
+        _ => 0,
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_max_streams() -> u32 {
+    25
+}
+fn default_nudity_filter() -> Vec<String> {
+    vec!["Severe".to_string()]
+}
+fn default_cert_filter() -> Vec<String> {
+    vec!["Adults+".to_string()]
+}
+fn default_quality_filter() -> Vec<String> {
+    default_quality_filter_groups()
+}
+fn default_priority() -> i32 {
+    1
+}
+fn default_stream_type_grouping() -> String {
+    "separate".to_string()
+}
+fn default_stream_type_order() -> Vec<String> {
+    vec![
+        "torrent".to_string(),
+        "usenet".to_string(),
+        "telegram".to_string(),
+        "http".to_string(),
+        "acestream".to_string(),
+        "youtube".to_string(),
+    ]
+}
+fn default_enable_usenet_streams() -> bool {
+    true
+}
+fn default_max_streams_per_resolution() -> u32 {
+    10
+}
+
+// ─── Indexer configuration ────────────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct IndexerInstanceConfig {
+    #[serde(default, rename = "u", alias = "url")]
+    pub url: Option<String>,
+    #[serde(default, rename = "ak", alias = "api_key")]
+    pub api_key: Option<String>,
+    #[serde(default = "default_true", rename = "ug", alias = "use_global")]
+    pub use_global: bool,
+    #[serde(default, rename = "en", alias = "enabled")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct TorznabEndpoint {
+    #[serde(rename = "i", alias = "id")]
+    pub id: String,
+    #[serde(rename = "n", alias = "name")]
+    pub name: String,
+    #[serde(rename = "u", alias = "url")]
+    pub url: String,
+    #[serde(default, rename = "h", alias = "headers")]
+    pub headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(default = "default_true", rename = "en", alias = "enabled")]
+    pub enabled: bool,
+    #[serde(default, rename = "c", alias = "categories")]
+    pub categories: Vec<i64>,
+    #[serde(default = "default_priority", rename = "p", alias = "priority")]
+    pub priority: i32,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct NewznabIndexer {
+    #[serde(rename = "i", alias = "id")]
+    pub id: String,
+    #[serde(rename = "n", alias = "name")]
+    pub name: String,
+    #[serde(rename = "u", alias = "url")]
+    pub url: String,
+    #[serde(default, rename = "ak", alias = "api_key")]
+    pub api_key: Option<String>,
+    #[serde(default = "default_true", rename = "en", alias = "enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_priority", rename = "p", alias = "priority")]
+    pub priority: i32,
+    #[serde(default, rename = "mc", alias = "movie_categories")]
+    pub movie_categories: Vec<i64>,
+    #[serde(default, rename = "tc", alias = "tv_categories")]
+    pub tv_categories: Vec<i64>,
+    // unused fields — kept so deserialization doesn't lose data
+    #[serde(default, rename = "uz", alias = "use_zyclops", skip_serializing)]
+    pub use_zyclops: bool,
+    #[serde(default, rename = "zb", alias = "zyclops_backbones", skip_serializing)]
+    pub zyclops_backbones: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct IndexerConfig {
+    #[serde(default, rename = "pr", alias = "prowlarr")]
+    pub prowlarr: Option<IndexerInstanceConfig>,
+    #[serde(default, rename = "jk", alias = "jackett")]
+    pub jackett: Option<IndexerInstanceConfig>,
+    #[serde(default, rename = "tz", alias = "torznab_endpoints")]
+    pub torznab_endpoints: Vec<TorznabEndpoint>,
+    #[serde(default, rename = "nz", alias = "newznab_indexers")]
+    pub newznab_indexers: Vec<NewznabIndexer>,
+}
+
+// ─── MediaFlow Proxy configuration ───────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct MediaFlowConfig {
+    #[serde(default, rename = "pu", alias = "proxy_url")]
+    pub proxy_url: Option<String>,
+    #[serde(default, rename = "ap", alias = "api_password")]
+    pub api_password: Option<String>,
+    #[serde(default, rename = "pls", alias = "proxy_live_streams")]
+    pub proxy_live_streams: bool,
+    #[serde(default, rename = "ewp", alias = "enable_web_playback")]
+    pub enable_web_playback: bool,
+}
+
+// ─── Streaming provider ───────────────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct StreamingProvider {
+    #[serde(default, rename = "n", alias = "name")]
+    pub name: String,
+    #[serde(rename = "sv", alias = "service")]
+    pub service: String,
+    #[serde(
+        default = "default_true",
+        rename = "ewc",
+        alias = "enable_watchlist_catalogs"
+    )]
+    pub enable_watchlist_catalogs: bool,
+    #[serde(default, rename = "tk", alias = "token")]
+    pub token: Option<String>,
+    #[serde(default, rename = "em", alias = "email")]
+    pub email: Option<String>,
+    #[serde(default, rename = "pw", alias = "password")]
+    pub password: Option<String>,
+    #[serde(default = "default_true", rename = "en", alias = "enabled")]
+    pub enabled: bool,
+    #[serde(default, rename = "pr", alias = "priority")]
+    pub priority: i32,
+    #[serde(default = "default_true", rename = "umf", alias = "use_mediaflow")]
+    pub use_mediaflow: bool,
+    #[serde(default, rename = "oscs", alias = "only_show_cached_streams")]
+    pub only_show_cached_streams: bool,
+    #[serde(default, rename = "eun", alias = "enable_usenet")]
+    pub enable_usenet: bool,
+    // Complex nested configs — kept as raw JSON so we don't lose data but don't need to parse
+    #[serde(
+        default,
+        rename = "qbc",
+        alias = "qbittorrent_config",
+        skip_serializing
+    )]
+    pub qbittorrent_config: Option<Value>,
+    #[serde(default, rename = "sbc", alias = "sabnzbd_config", skip_serializing)]
+    pub sabnzbd_config: Option<Value>,
+    #[serde(default, rename = "ngc", alias = "nzbget_config", skip_serializing)]
+    pub nzbget_config: Option<Value>,
+    #[serde(default, rename = "ndc", alias = "nzbdav_config", skip_serializing)]
+    pub nzbdav_config: Option<Value>,
+    #[serde(default, rename = "enc", alias = "easynews_config", skip_serializing)]
+    pub easynews_config: Option<Value>,
+    #[serde(default, rename = "u", alias = "url", skip_serializing)]
+    pub url: Option<String>,
+    #[serde(
+        default,
+        rename = "stsn",
+        alias = "stremthru_store_name",
+        skip_serializing
+    )]
+    pub stremthru_store_name: Option<String>,
+}
+
+impl StreamingProvider {
+    /// Redis debrid-cache namespace (mirrors Python `get_cache_service_name`).
+    pub fn cache_service_name(&self) -> String {
+        if self.service == "stremthru" {
+            if let Some(name) = self
+                .stremthru_store_name
+                .as_deref()
+                .filter(|s| !s.is_empty())
+            {
+                return name.to_string();
+            }
+        }
+        self.service.clone()
+    }
+}
+
+// ─── Catalog configuration ────────────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct CatalogConfig {
+    #[serde(rename = "ci", alias = "catalog_id")]
+    pub catalog_id: String,
+    #[serde(default = "default_true", rename = "en", alias = "enabled")]
+    pub enabled: bool,
+    #[serde(default, rename = "s", alias = "sort")]
+    pub sort: Option<String>,
+    #[serde(default, rename = "o", alias = "order")]
+    pub order: Option<String>,
+}
+
+// ─── UserData ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UserData {
+    // User identification
+    #[serde(default, rename = "uid", alias = "user_id")]
+    pub user_id: Option<crate::db::UserId>,
+    #[serde(default, rename = "pid", alias = "profile_id")]
+    pub profile_id: Option<crate::db::ProfileId>,
+    #[serde(default, rename = "uuuid", alias = "user_uuid", skip_serializing)]
+    pub user_uuid: Option<String>,
+    #[serde(default, rename = "puuid", alias = "profile_uuid", skip_serializing)]
+    pub profile_uuid: Option<String>,
+
+    // Auth
+    #[serde(default, rename = "ap", alias = "api_password")]
+    pub api_password: Option<String>,
+
+    // Streaming providers
+    #[serde(default, rename = "sps", alias = "streaming_providers")]
+    pub streaming_providers: Vec<StreamingProvider>,
+    // Legacy single provider — merged into streaming_providers on access
+    #[serde(default, rename = "sp", alias = "streaming_provider")]
+    pub streaming_provider: Option<StreamingProvider>,
+
+    // Catalog settings
+    #[serde(default = "default_true", rename = "ec", alias = "enable_catalogs")]
+    pub enable_catalogs: bool,
+    #[serde(default, rename = "eim", alias = "enable_imdb_metadata")]
+    pub enable_imdb_metadata: bool,
+    #[serde(default, rename = "cc", alias = "catalog_configs")]
+    pub catalog_configs: Vec<CatalogConfig>,
+    #[serde(default, rename = "sc", alias = "selected_catalogs")]
+    pub selected_catalogs: Vec<String>,
+
+    // Stream filters
+    #[serde(default, rename = "nf", alias = "nudity_filter")]
+    pub nudity_filter: Vec<String>,
+    #[serde(default, rename = "cf", alias = "certification_filter")]
+    pub certification_filter: Vec<String>,
+    #[serde(
+        default = "default_selected_resolutions",
+        rename = "sr",
+        alias = "selected_resolutions"
+    )]
+    pub selected_resolutions: Vec<Option<String>>,
+    #[serde(
+        default = "default_hdr_filter",
+        rename = "hf",
+        alias = "hdr_filter",
+        skip_serializing
+    )]
+    pub hdr_filter: Vec<String>,
+    #[serde(
+        default = "default_max_size",
+        deserialize_with = "deserialize_max_size",
+        rename = "ms",
+        alias = "max_size"
+    )]
+    pub max_size: f64,
+    #[serde(
+        default = "default_min_size",
+        deserialize_with = "deserialize_min_size",
+        rename = "mns",
+        alias = "min_size"
+    )]
+    pub min_size: i64,
+    #[serde(
+        default = "default_quality_filter",
+        rename = "qf",
+        alias = "quality_filter",
+        skip_serializing
+    )]
+    pub quality_filter: Vec<String>,
+
+    // Stream display / combining
+    #[serde(default = "default_max_streams", rename = "mxs", alias = "max_streams")]
+    pub max_streams: u32,
+    #[serde(
+        default = "default_max_streams_per_resolution",
+        rename = "mspr",
+        alias = "max_streams_per_resolution"
+    )]
+    pub max_streams_per_resolution: u32,
+    #[serde(
+        default = "default_stream_type_grouping",
+        rename = "stg",
+        alias = "stream_type_grouping"
+    )]
+    pub stream_type_grouping: String,
+    #[serde(
+        default = "default_stream_type_order",
+        rename = "sto",
+        alias = "stream_type_order"
+    )]
+    pub stream_type_order: Vec<String>,
+    #[serde(default, rename = "pg", alias = "provider_grouping", skip_serializing)]
+    pub provider_grouping: Option<String>,
+
+    // Stream type toggles
+    #[serde(
+        default = "default_enable_usenet_streams",
+        rename = "eus",
+        alias = "enable_usenet_streams"
+    )]
+    pub enable_usenet_streams: bool,
+    #[serde(default, rename = "puot", alias = "prefer_usenet_over_torrent")]
+    pub prefer_usenet_over_torrent: bool,
+    #[serde(default, rename = "ets", alias = "enable_telegram_streams")]
+    pub enable_telegram_streams: bool,
+    #[serde(default, rename = "eas", alias = "enable_acestream_streams")]
+    pub enable_acestream_streams: bool,
+
+    // Live search
+    #[serde(default, rename = "lss", alias = "live_search_streams")]
+    pub live_search_streams: bool,
+
+    // MediaFlow
+    #[serde(default, rename = "mfc", alias = "mediaflow_config")]
+    pub mediaflow_config: Option<MediaFlowConfig>,
+
+    // Indexers
+    #[serde(default, rename = "ic", alias = "indexer_config")]
+    pub indexer_config: Option<IndexerConfig>,
+
+    // External integrations — kept as raw JSON, not parsed by Rust
+    #[serde(default, rename = "mdb", alias = "mdblist_config", skip_serializing)]
+    pub mdblist_config: Option<Value>,
+    #[serde(default, rename = "rpc", alias = "rpdb_config", skip_serializing)]
+    pub rpdb_config: Option<Value>,
+    #[serde(default, rename = "tmdb", alias = "tmdb_config", skip_serializing)]
+    pub tmdb_config: Option<Value>,
+    #[serde(default, rename = "tvdb", alias = "tvdb_config", skip_serializing)]
+    pub tvdb_config: Option<Value>,
+    #[serde(default, rename = "tgc", alias = "telegram_config", skip_serializing)]
+    pub telegram_config: Option<Value>,
+    #[serde(default, rename = "st", alias = "stream_template", skip_serializing)]
+    pub stream_template: Option<Value>,
+
+    // Stream name filter — not yet used in Rust but must survive round-trip
+    #[serde(
+        default,
+        rename = "snfm",
+        alias = "stream_name_filter_mode",
+        skip_serializing
+    )]
+    pub stream_name_filter_mode: Option<String>,
+    #[serde(
+        default,
+        rename = "snfp",
+        alias = "stream_name_filter_patterns",
+        skip_serializing
+    )]
+    pub stream_name_filter_patterns: Vec<String>,
+    #[serde(
+        default,
+        rename = "snfr",
+        alias = "stream_name_filter_use_regex",
+        skip_serializing
+    )]
+    pub stream_name_filter_use_regex: bool,
+
+    // Misc unused fields — round-trip safe
+    #[serde(default, rename = "ia", alias = "include_anime", skip_serializing)]
+    pub include_anime: bool,
+    #[serde(default, rename = "ed", alias = "enable_discover", skip_serializing)]
+    pub enable_discover: bool,
+    #[serde(
+        default = "default_torrent_sorting_priority",
+        rename = "tsp",
+        alias = "torrent_sorting_priority",
+        skip_serializing
+    )]
+    pub torrent_sorting_priority: Vec<Value>,
+    #[serde(
+        default = "default_language_sorting",
+        rename = "ls",
+        alias = "language_sorting",
+        skip_serializing
+    )]
+    pub language_sorting: Vec<Value>,
+}
+
+impl Default for UserData {
+    fn default() -> Self {
+        UserData {
+            user_id: None,
+            profile_id: None,
+            user_uuid: None,
+            profile_uuid: None,
+            api_password: None,
+            streaming_providers: Vec::new(),
+            streaming_provider: None,
+            enable_catalogs: true,
+            enable_imdb_metadata: false,
+            catalog_configs: Vec::new(),
+            selected_catalogs: Vec::new(),
+            nudity_filter: default_nudity_filter(),
+            certification_filter: default_cert_filter(),
+            selected_resolutions: default_selected_resolutions(),
+            hdr_filter: default_hdr_filter(),
+            max_size: default_max_size(),
+            min_size: default_min_size(),
+            quality_filter: default_quality_filter(),
+            max_streams: 25,
+            max_streams_per_resolution: 10,
+            stream_type_grouping: default_stream_type_grouping(),
+            stream_type_order: default_stream_type_order(),
+            provider_grouping: None,
+            enable_usenet_streams: true,
+            prefer_usenet_over_torrent: false,
+            enable_telegram_streams: false,
+            enable_acestream_streams: false,
+            live_search_streams: false,
+            mediaflow_config: None,
+            indexer_config: None,
+            mdblist_config: None,
+            rpdb_config: None,
+            tmdb_config: None,
+            tvdb_config: None,
+            telegram_config: None,
+            stream_template: None,
+            stream_name_filter_mode: None,
+            stream_name_filter_patterns: Vec::new(),
+            stream_name_filter_use_regex: false,
+            include_anime: true,
+            enable_discover: false,
+            torrent_sorting_priority: default_torrent_sorting_priority(),
+            language_sorting: default_language_sorting(),
+        }
+    }
+}
+
+// ─── Provider short names ─────────────────────────────────────────────────────
+
+const PROVIDER_SHORT_NAMES: &[(&str, &str)] = &[
+    ("realdebrid", "RD"),
+    ("premiumize", "PM"),
+    ("alldebrid", "AD"),
+    ("debridlink", "DL"),
+    ("offcloud", "OC"),
+    ("pikpak", "PKP"),
+    ("torbox", "TRB"),
+    ("seedr", "SDR"),
+    ("stremthru", "ST"),
+    ("qbittorrent", "QB"),
+    ("easydebrid", "ED"),
+    ("debrider", "DBR"),
+];
+
+fn short_name(service: &str) -> Option<&'static str> {
+    PROVIDER_SHORT_NAMES
+        .iter()
+        .find(|(s, _)| *s == service)
+        .map(|(_, n)| *n)
+}
+
+/// Short label for a streaming provider (e.g. `seedr` → `SDR`).
+pub fn provider_short_name(service: &str) -> &str {
+    short_name(service).unwrap_or(service)
+}
+
+// ─── UserData methods ─────────────────────────────────────────────────────────
+
+/// MDBList catalog list entry parsed from `mdblist_config.lists`.
+#[derive(Debug, Clone)]
+pub struct MdbListItem {
+    pub id: i32,
+    pub title: String,
+    pub catalog_type: String,
+    pub use_filters: bool,
+    pub sort: String,
+    pub order: String,
+}
+
+impl MdbListItem {
+    pub fn catalog_id(&self) -> String {
+        format!("mdblist_{}_{}", self.catalog_type, self.id)
+    }
+}
+
+impl UserData {
+    /// MDBList API key from profile config (`mdb.ak` / `api_key`).
+    pub fn mdblist_api_key(&self) -> Option<&str> {
+        self.mdblist_config
+            .as_ref()
+            .and_then(|cfg| {
+                cfg.get("ak")
+                    .or_else(|| cfg.get("api_key"))
+                    .and_then(|v| v.as_str())
+            })
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Parsed MDBList list definitions from `mdblist_config.lists` / `l`.
+    pub fn mdblist_lists(&self) -> Vec<MdbListItem> {
+        let Some(cfg) = &self.mdblist_config else {
+            return vec![];
+        };
+        let lists = cfg
+            .get("lists")
+            .or_else(|| cfg.get("l"))
+            .and_then(|v| v.as_array());
+        let Some(lists) = lists else {
+            return vec![];
+        };
+
+        lists
+            .iter()
+            .filter_map(|item| {
+                let id = item
+                    .get("i")
+                    .or_else(|| item.get("id"))
+                    .and_then(|v| v.as_i64())? as i32;
+                let title = item
+                    .get("t")
+                    .or_else(|| item.get("title"))
+                    .or_else(|| item.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let catalog_type = item
+                    .get("ct")
+                    .or_else(|| item.get("catalog_type"))
+                    .or_else(|| item.get("type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("movie")
+                    .to_string();
+                let use_filters = item
+                    .get("uf")
+                    .or_else(|| item.get("use_filters"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let sort = item
+                    .get("s")
+                    .or_else(|| item.get("sort"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("rank")
+                    .to_string();
+                let order = item
+                    .get("o")
+                    .or_else(|| item.get("order"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("desc")
+                    .to_string();
+                Some(MdbListItem {
+                    id,
+                    title,
+                    catalog_type,
+                    use_filters,
+                    sort,
+                    order,
+                })
+            })
+            .collect()
+    }
+
+    /// Lookup an MDBList list config by Stremio catalog id (`mdblist_{type}_{id}`).
+    pub fn mdblist_list_for_catalog(&self, catalog_id: &str) -> Option<MdbListItem> {
+        let raw_id = catalog_id.rsplit('_').next()?;
+        let list_id: i32 = raw_id.split('.').next()?.parse().ok()?;
+        self.mdblist_lists()
+            .into_iter()
+            .find(|l| l.id == list_id && l.catalog_id() == catalog_id)
+    }
+
+    /// True when MediaFlow is configured with both proxy_url and api_password.
+    pub fn has_mediaflow_config(&self) -> bool {
+        self.mediaflow_config
+            .as_ref()
+            .map(|m| {
+                m.proxy_url
+                    .as_deref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
+    /// RPDB API key from profile config (`rpdb_config.api_key`).
+    pub fn rpdb_api_key(&self) -> Option<&str> {
+        self.rpdb_config
+            .as_ref()
+            .and_then(|cfg| cfg.get("api_key"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// All enabled streaming providers (merges legacy `sp` into `sps`).
+    pub fn all_providers(&self) -> Vec<&StreamingProvider> {
+        let mut providers: Vec<&StreamingProvider> = self
+            .streaming_providers
+            .iter()
+            .filter(|p| p.enabled)
+            .collect();
+        if providers.is_empty() {
+            if let Some(ref sp) = self.streaming_provider {
+                if sp.enabled {
+                    providers.push(sp);
+                }
+            }
+        }
+        providers
+    }
+
+    /// Active streaming providers sorted by priority.
+    ///
+    /// Mirrors Python `UserData.get_active_providers()`: merges legacy single provider,
+    /// and injects operator-configured NzbDAV when the user has none.
+    pub fn get_active_providers(&self, default_nzbdav: Option<&Value>) -> Vec<StreamingProvider> {
+        let mut providers: Vec<StreamingProvider> = if !self.streaming_providers.is_empty() {
+            self.streaming_providers
+                .iter()
+                .filter(|p| p.enabled)
+                .cloned()
+                .collect()
+        } else if let Some(ref sp) = self.streaming_provider {
+            if sp.enabled {
+                vec![sp.clone()]
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
+        if let Some(cfg) = default_nzbdav {
+            let has_nzbdav = providers.iter().any(|p| p.service == "nzbdav");
+            if !has_nzbdav {
+                providers.push(StreamingProvider {
+                    name: "operator-nzbdav".into(),
+                    service: "nzbdav".into(),
+                    enabled: true,
+                    priority: 100,
+                    nzbdav_config: Some(cfg.clone()),
+                    ..Default::default()
+                });
+            }
+        }
+
+        providers.sort_by_key(|p| p.priority);
+        providers
+    }
+
+    /// Streaming providers that want watchlist catalogs (service, short_name pairs).
+    pub fn watchlist_providers(&self) -> Vec<(&str, &str)> {
+        self.all_providers()
+            .into_iter()
+            .filter(|sp| sp.enable_watchlist_catalogs)
+            .filter_map(|sp| short_name(&sp.service).map(|n| (sp.service.as_str(), n)))
+            .collect()
+    }
+
+    /// Suffix to append to addon name, e.g. " RD+TRB".
+    pub fn addon_name_suffix(&self) -> String {
+        let parts: Vec<&str> = self
+            .all_providers()
+            .into_iter()
+            .filter_map(|sp| short_name(&sp.service))
+            .collect();
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", parts.join("+"))
+        }
+    }
+
+    /// Sort configuration for a specific catalog (sort, order).
+    pub fn catalog_sort(&self, catalog_id: &str) -> (String, String) {
+        self.catalog_configs
+            .iter()
+            .find(|c| c.catalog_id == catalog_id)
+            .map(|c| {
+                (
+                    c.sort.clone().unwrap_or_else(|| "latest".into()),
+                    c.order.clone().unwrap_or_else(|| "desc".into()),
+                )
+            })
+            .unwrap_or_else(|| ("latest".into(), "desc".into()))
+    }
+
+    /// Whether any streaming providers are configured.
+    pub fn has_providers(&self) -> bool {
+        !self.all_providers().is_empty()
+    }
+
+    /// Find an enabled provider by its service name.
+    pub fn get_provider_by_name(&self, name: &str) -> Option<&StreamingProvider> {
+        self.all_providers()
+            .into_iter()
+            .find(|sp| sp.service == name)
+    }
+
+    /// First enabled streaming provider (primary).
+    pub fn get_primary_provider(&self) -> Option<&StreamingProvider> {
+        self.all_providers().into_iter().next()
+    }
+
+    /// Parsed sorting options (shared by filter and stream routes).
+    pub fn sorting_priority(&self) -> Vec<SortingOption> {
+        self.torrent_sorting_priority
+            .iter()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect()
+    }
+
+    /// Language sort/filter list as strings (None = unknown sentinel).
+    pub fn language_sorting_list(&self) -> Vec<Option<String>> {
+        self.language_sorting
+            .iter()
+            .map(|v| v.as_str().map(str::to_string))
+            .collect()
+    }
+
+    pub fn effective_selected_resolutions(&self) -> Vec<Option<String>> {
+        if self.selected_resolutions.is_empty() {
+            default_resolutions_vec()
+        } else {
+            self.selected_resolutions.clone()
+        }
+    }
+
+    pub fn effective_hdr_filter(&self) -> Vec<String> {
+        if self.hdr_filter.is_empty() {
+            default_hdr_filter_vec()
+        } else {
+            self.hdr_filter.clone()
+        }
+    }
+
+    pub fn quality_filter_set(&self) -> HashSet<Option<String>> {
+        let groups = if self.quality_filter.is_empty() {
+            default_quality_filter_groups()
+        } else {
+            self.quality_filter.clone()
+        };
+        expand_quality_filter(&groups)
+    }
+
+    pub fn hdr_filter_set(&self) -> HashSet<String> {
+        self.effective_hdr_filter().into_iter().collect()
+    }
+
+    pub fn language_filter_set(&self) -> HashSet<Option<String>> {
+        let list = if self.language_sorting.is_empty() {
+            default_language_sorting_values()
+        } else {
+            self.language_sorting.clone()
+        };
+        list.into_iter()
+            .map(|v| v.as_str().map(str::to_string))
+            .collect()
+    }
+
+    pub fn effective_max_streams(&self) -> u32 {
+        self.max_streams.clamp(1, 100)
+    }
+
+    /// Combine stream groups by type using user's `stg`/`sto`/`mxs` preferences.
+    ///
+    /// Mirrors Python's `_combine_streams_by_type`:
+    /// - "mixed": round-robin interleave from each type in `sto` order
+    /// - "separate" (default): concatenate each type in `sto` order
+    /// - Apply `max_streams` cap at the end
+    pub fn combine_streams_by_type<T: Clone>(
+        &self,
+        stream_groups: &std::collections::HashMap<&str, Vec<T>>,
+    ) -> Vec<T> {
+        if self.stream_type_grouping == "mixed" {
+            // "mixed" mode is handled by the unified-sort path in stream.rs before reaching here.
+            // This fallback concatenates in type order and applies the total cap.
+            let mut combined: Vec<T> = Vec::new();
+            for stream_type in &self.stream_type_order {
+                if let Some(lst) = stream_groups.get(stream_type.as_str()) {
+                    combined.extend_from_slice(lst);
+                }
+            }
+            combined.truncate(self.max_streams as usize);
+            combined
+        } else {
+            // "separate": concatenate in stream_type_order.
+            // Each type was already capped at max_streams before this call — no re-cap.
+            let mut combined: Vec<T> = Vec::new();
+            for stream_type in &self.stream_type_order {
+                if let Some(lst) = stream_groups.get(stream_type.as_str()) {
+                    combined.extend_from_slice(lst);
+                }
+            }
+            combined
+        }
+    }
+}

@@ -1,0 +1,117 @@
+services:
+  # ── Primary API (Rust) ────────────────────────────────────────────────────
+  mediafusion-api:
+    image: mhdzumair/mediafusion:6.0.0-beta.22
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - POSTGRES_URI=postgresql://mediafusion:mediafusion@postgres:5432/mediafusion
+      - REDIS_URL=redis://redis:6379
+      - STREAM_RS_PORT=8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 1m
+      timeout: 10s
+      retries: 5
+      start_period: 20m
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - mediafusion-network
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:18-alpine
+    container_name: mediafusion-postgres
+    shm_size: 256mb
+    environment:
+      POSTGRES_USER: mediafusion
+      POSTGRES_PASSWORD: mediafusion
+      POSTGRES_DB: mediafusion
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=128MB"
+      - "-c"
+      - "effective_cache_size=384MB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "wal_buffers=8MB"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "effective_io_concurrency=200"
+      - "-c"
+      - "work_mem=8MB"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.track=all"
+      - "-c"
+      - "pg_stat_statements.max=10000"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mediafusion -d mediafusion"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - mediafusion-network
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --save 60 1 --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - mediafusion-network
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+
+networks:
+  mediafusion-network:
+    driver: bridge

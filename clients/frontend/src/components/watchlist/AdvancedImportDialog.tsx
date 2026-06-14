@@ -1,0 +1,913 @@
+import { useState, useMemo, useCallback } from 'react'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Badge } from '@/components/ui/badge'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { Switch } from '@/components/ui/switch'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  Download,
+  Loader2,
+  Film,
+  Tv,
+  Trophy,
+  HardDrive,
+  FileVideo,
+  Search,
+  CheckCircle2,
+  XCircle,
+  AlertCircle,
+  Layers,
+  FolderOpen,
+} from 'lucide-react'
+import { useCombinedMetadataSearch, getBestExternalId, useAdvancedImport, type CombinedSearchResult } from '@/hooks'
+import { useAuth } from '@/hooks'
+import { useDebounce } from '@/hooks/useDebounce'
+import { ImportFileAnnotationDialog, MultiContentWizard } from '@/pages/ContentImport/components'
+import type { MissingTorrentItem, FileAnnotationData } from '@/lib/api/watchlist'
+import type { TorrentFile, TorrentAnalyzeResponse } from '@/lib/api'
+import { SPORTS_CATEGORY_OPTIONS, type SportsCategory } from '@/lib/constants'
+import {
+  getStoredAnonymousDisplayName,
+  normalizeAnonymousDisplayName,
+  saveAnonymousDisplayName,
+} from '@/lib/anonymousDisplayName'
+import type { FileAnnotation } from '@/pages/ContentImport/components/types'
+import type { ImportMode } from '@/lib/constants'
+import { cn } from '@/lib/utils'
+
+interface AdvancedImportDialogProps {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  torrent: MissingTorrentItem
+  provider: string
+  profileId?: number
+  initialIsAnonymous?: boolean
+  initialAnonymousDisplayName?: string
+  onSuccess?: () => void
+}
+
+const VIDEO_EXTENSIONS = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v']
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+}
+
+function hasEpisodePattern(value: string): boolean {
+  const normalized = value.replace(/[._-]/g, ' ')
+  return (
+    /\bS\d{1,3}\s*E\d{1,3}(?:\s*(?:E|[-~])\s*\d{1,3})?\b/i.test(normalized) ||
+    /\b\d{1,3}x\d{1,3}(?:\s*-\s*\d{1,3})?\b/i.test(normalized) ||
+    /\bseason\s*\d{1,3}\D+episode\s*\d{1,3}\b/i.test(normalized) ||
+    /\bE(?:P)?\s*\d{1,3}\b/i.test(normalized)
+  )
+}
+
+function inferInitialContentType(torrent: MissingTorrentItem): 'movie' | 'series' | 'sports' {
+  const videoPaths = torrent.files
+    .filter((file) => VIDEO_EXTENSIONS.some((ext) => file.path.toLowerCase().endsWith(ext)))
+    .map((file) => file.path.split('/').pop() || file.path)
+
+  if (videoPaths.some((path) => hasEpisodePattern(path))) {
+    return 'series'
+  }
+  if (torrent.parsed_type) {
+    return torrent.parsed_type
+  }
+  if (videoPaths.length > 3) {
+    return 'series'
+  }
+  return 'movie'
+}
+
+function inferInitialSportsCategory(torrent: MissingTorrentItem): SportsCategory | '' {
+  // Prefer the category detected by the backend.
+  if (torrent.sports_category) {
+    return torrent.sports_category as SportsCategory
+  }
+  const source = `${torrent.name || ''} ${torrent.parsed_title || ''}`.toLowerCase()
+  if (/\bmotogp\b|\bmoto\s*gp\b|\bmoto2\b|\bmoto3\b/.test(source)) {
+    return 'motogp_racing'
+  }
+  if (/\bformula\s*[123]\b|\bformula[123]\b|\bf[123]\b|\bindycar\b|\bnascar\b/.test(source)) {
+    return 'formula_racing'
+  }
+  return ''
+}
+
+/** Racing sports (F1/MotoGP) are stored as series, so each file is an episode. */
+function isRacingSeriesCategory(category: SportsCategory | ''): boolean {
+  return category === 'formula_racing' || category === 'motogp_racing'
+}
+
+export function AdvancedImportDialog({
+  open,
+  onOpenChange,
+  torrent,
+  provider,
+  profileId,
+  initialIsAnonymous,
+  initialAnonymousDisplayName,
+  onSuccess,
+}: AdvancedImportDialogProps) {
+  const { user } = useAuth()
+  const initialContentType = inferInitialContentType(torrent)
+  const initialSportsCategory = inferInitialSportsCategory(torrent)
+
+  // Form state
+  const [contentType, setContentType] = useState<'movie' | 'series' | 'sports'>(initialContentType)
+  const [sportsCategory, setSportsCategory] = useState<SportsCategory | ''>(
+    initialContentType === 'sports' ? initialSportsCategory : '',
+  )
+  const [importMode, setImportMode] = useState<ImportMode>('single')
+  const [searchQuery, setSearchQuery] = useState(torrent.parsed_title || '')
+  const [searchYear, setSearchYear] = useState(torrent.parsed_year ? String(torrent.parsed_year) : '')
+  const [manualTitle, setManualTitle] = useState(torrent.parsed_title || '')
+  const [poster, setPoster] = useState('')
+  const [background, setBackground] = useState('')
+  const [releaseDate, setReleaseDate] = useState('')
+  const [selectedMedia, setSelectedMedia] = useState<CombinedSearchResult | null>(null)
+  const [fileAnnotations, setFileAnnotations] = useState<FileAnnotation[]>([])
+  const [annotationDialogOpen, setAnnotationDialogOpen] = useState(false)
+  const [isAnonymous, setIsAnonymous] = useState(initialIsAnonymous ?? user?.contribute_anonymously ?? false)
+  const [anonymousDisplayName, setAnonymousDisplayName] = useState(
+    initialAnonymousDisplayName ?? getStoredAnonymousDisplayName(),
+  )
+
+  // Import state
+  const [importResult, setImportResult] = useState<{
+    status: 'success' | 'failed' | 'skipped'
+    message: string
+  } | null>(null)
+
+  const debouncedQuery = useDebounce(searchQuery, 300)
+  const trimmedSearchYear = searchYear.trim()
+  const parsedSearchYear = trimmedSearchYear ? Number(trimmedSearchYear) : undefined
+  const validSearchYear = Number.isFinite(parsedSearchYear) ? parsedSearchYear : undefined
+  const advancedImport = useAdvancedImport()
+
+  // Check if in multi-content mode
+  const isMultiContentMode = importMode === 'collection' || importMode === 'pack'
+
+  const sportsSearchType = useMemo<'movie' | 'series'>(
+    () => (sportsCategory === 'formula_racing' || sportsCategory === 'motogp_racing' ? 'series' : 'movie'),
+    [sportsCategory],
+  )
+
+  // Search for metadata (combined internal + external search)
+  const {
+    data: searchResults = [],
+    isLoading: isSearching,
+    isFetching: isFetchingSearch,
+  } = useCombinedMetadataSearch(
+    {
+      query: debouncedQuery,
+      type: contentType === 'sports' ? sportsSearchType : contentType,
+      limit: 15,
+      year: validSearchYear,
+    },
+    { enabled: debouncedQuery.length >= 2 && !isMultiContentMode },
+  )
+
+  // Convert torrent files to TorrentFile format for annotation dialog
+  const torrentFiles: TorrentFile[] = useMemo(() => {
+    return torrent.files
+      .filter((f) => VIDEO_EXTENSIONS.some((ext) => f.path.toLowerCase().endsWith(ext)))
+      .map((f, idx) => ({
+        filename: f.path.split('/').pop() || f.path,
+        size: f.size,
+        index: idx,
+        episode_title: f.episode_title,
+      }))
+  }, [torrent.files])
+
+  // Racing sports (F1/MotoGP) are series — allow per-file episode annotation.
+  const isRacingSeries = contentType === 'sports' && isRacingSeriesCategory(sportsCategory)
+  const showAnnotationButton =
+    (contentType !== 'sports' && (torrentFiles.length > 1 || (contentType === 'series' && torrentFiles.length > 0))) ||
+    (isRacingSeries && torrentFiles.length > 0)
+
+  // Create a mock analysis object for the MultiContentWizard
+  const mockAnalysis: TorrentAnalyzeResponse = useMemo(
+    () => ({
+      status: 'success' as const,
+      torrent_name: torrent.name,
+      parsed_title: torrent.parsed_title,
+      year: torrent.parsed_year,
+      info_hash: torrent.info_hash,
+      total_size: torrent.size,
+      total_size_readable: formatBytes(torrent.size),
+      file_count: torrent.files.length,
+      files: torrentFiles,
+      matches: [],
+    }),
+    [torrent, torrentFiles],
+  )
+
+  const handleSelectMedia = useCallback((result: CombinedSearchResult) => {
+    setSelectedMedia(result)
+    setManualTitle(result.title)
+    setPoster(result.poster || '')
+    setBackground('')
+    setImportResult(null)
+  }, [])
+
+  const handleAnnotationConfirm = useCallback((annotations: FileAnnotation[]) => {
+    setFileAnnotations(annotations)
+    setAnnotationDialogOpen(false)
+  }, [])
+
+  // Handle multi-content wizard completion
+  const handleMultiContentComplete = useCallback(
+    async (annotations: FileAnnotation[]) => {
+      // Build file_data from multi-content annotations
+      const fileData: FileAnnotationData[] = annotations.map((f) => ({
+        filename: f.filename,
+        size: f.size,
+        index: f.index,
+        season_number: f.season_number,
+        episode_number: f.episode_number,
+        episode_end: f.episode_end,
+        included: true,
+        meta_id: f.meta_id,
+        meta_title: f.meta_title,
+        meta_type: f.meta_type,
+      }))
+      const normalizedAnonymousDisplayName = isAnonymous
+        ? normalizeAnonymousDisplayName(anonymousDisplayName)
+        : undefined
+
+      try {
+        const result = await advancedImport.mutateAsync({
+          provider,
+          profileId,
+          isAnonymous,
+          anonymousDisplayName: normalizedAnonymousDisplayName,
+          imports: [
+            {
+              info_hash: torrent.info_hash,
+              meta_type: contentType,
+              // For multi-content, use the first file's meta_id as the primary
+              meta_id: annotations[0]?.meta_id || '',
+              title: manualTitle || torrent.parsed_title,
+              poster: poster || undefined,
+              background: background || undefined,
+              release_date: releaseDate || undefined,
+              sports_category: contentType === 'sports' ? sportsCategory || undefined : undefined,
+              file_data: fileData,
+            },
+          ],
+        })
+
+        const detail = result.details[0]
+        if (detail) {
+          setImportResult({
+            status: detail.status as 'success' | 'failed' | 'skipped',
+            message: detail.message || (detail.status === 'success' ? 'Import successful' : 'Import failed'),
+          })
+
+          if (detail.status === 'success') {
+            onSuccess?.()
+          }
+        }
+      } catch (error) {
+        setImportResult({
+          status: 'failed',
+          message: error instanceof Error ? error.message : 'Import failed',
+        })
+      }
+    },
+    [
+      torrent.info_hash,
+      torrent.parsed_title,
+      contentType,
+      manualTitle,
+      poster,
+      background,
+      releaseDate,
+      sportsCategory,
+      provider,
+      profileId,
+      advancedImport,
+      onSuccess,
+      isAnonymous,
+      anonymousDisplayName,
+    ],
+  )
+
+  const handleImport = useCallback(async () => {
+    if (contentType !== 'sports' && !selectedMedia) return
+    if (contentType === 'sports' && !manualTitle.trim()) return
+
+    // Build file_data from annotations or use defaults
+    const fileData: FileAnnotationData[] =
+      fileAnnotations.length > 0
+        ? fileAnnotations
+            .filter((f) => f.included)
+            .map((f) => ({
+              filename: f.filename,
+              size: f.size,
+              index: f.index,
+              season_number: f.season_number,
+              episode_number: f.episode_number,
+              episode_end: f.episode_end,
+              included: f.included,
+              episode_title: f.title ?? undefined,
+              release_date: f.release_date ?? undefined,
+              meta_id: f.meta_id,
+              meta_title: f.meta_title,
+              meta_type: f.meta_type,
+            }))
+        : torrentFiles.map((f) => ({
+            filename: f.filename,
+            size: f.size,
+            index: f.index,
+            included: true,
+          }))
+    const normalizedAnonymousDisplayName = isAnonymous ? normalizeAnonymousDisplayName(anonymousDisplayName) : undefined
+
+    try {
+      const result = await advancedImport.mutateAsync({
+        provider,
+        profileId,
+        isAnonymous,
+        anonymousDisplayName: normalizedAnonymousDisplayName,
+        imports: [
+          {
+            info_hash: torrent.info_hash,
+            meta_type: contentType,
+            meta_id: selectedMedia ? getBestExternalId(selectedMedia) : undefined,
+            title: manualTitle.trim() || selectedMedia?.title || torrent.parsed_title || torrent.name,
+            sports_category: contentType === 'sports' ? sportsCategory || undefined : undefined,
+            poster: poster || undefined,
+            background: background || undefined,
+            release_date: releaseDate || undefined,
+            file_data: fileData.length > 0 ? fileData : undefined,
+          },
+        ],
+      })
+
+      const detail = result.details[0]
+      if (detail) {
+        setImportResult({
+          status: detail.status as 'success' | 'failed' | 'skipped',
+          message: detail.message || (detail.status === 'success' ? 'Import successful' : 'Import failed'),
+        })
+
+        if (detail.status === 'success') {
+          onSuccess?.()
+        }
+      }
+    } catch (error) {
+      setImportResult({
+        status: 'failed',
+        message: error instanceof Error ? error.message : 'Import failed',
+      })
+    }
+  }, [
+    selectedMedia,
+    manualTitle,
+    fileAnnotations,
+    torrentFiles,
+    torrent.info_hash,
+    torrent.parsed_title,
+    torrent.name,
+    contentType,
+    sportsCategory,
+    poster,
+    background,
+    releaseDate,
+    provider,
+    profileId,
+    advancedImport,
+    onSuccess,
+    isAnonymous,
+    anonymousDisplayName,
+  ])
+
+  const handleClose = useCallback(() => {
+    onOpenChange(false)
+    // Reset state after close
+    setTimeout(() => {
+      const resetContentType = inferInitialContentType(torrent)
+      setContentType(resetContentType)
+      setSportsCategory(resetContentType === 'sports' ? inferInitialSportsCategory(torrent) : '')
+      setSearchQuery(torrent.parsed_title || '')
+      setManualTitle(torrent.parsed_title || '')
+      setPoster('')
+      setBackground('')
+      setReleaseDate('')
+      setSelectedMedia(null)
+      setFileAnnotations([])
+      setImportResult(null)
+      setImportMode('single')
+    }, 200)
+  }, [onOpenChange, torrent])
+
+  // Import mode options based on content type
+  const importModeOptions =
+    contentType === 'movie'
+      ? [
+          { value: 'single', label: 'Single Movie', icon: Film, description: 'One movie file' },
+          { value: 'collection', label: 'Movie Collection', icon: Layers, description: 'Multiple movies' },
+        ]
+      : contentType === 'series'
+        ? [
+            { value: 'single', label: 'Single Series', icon: Tv, description: 'Episodes of one show' },
+            { value: 'pack', label: 'Series Pack', icon: FolderOpen, description: 'Multiple series' },
+          ]
+        : [{ value: 'single', label: 'Single Sports Event', icon: Trophy, description: 'One sports event import' }]
+
+  return (
+    <>
+      <Dialog open={open} onOpenChange={handleClose}>
+        <DialogContent
+          scrollMode="contained"
+          className={cn(
+            'flex min-h-0 flex-col overflow-hidden',
+            isMultiContentMode ? 'max-w-4xl max-h-[85vh] p-0 gap-0' : 'max-w-2xl max-h-[85vh]',
+          )}
+        >
+          {isMultiContentMode ? (
+            // Multi-content wizard mode
+            <>
+              <div className="border-b p-4">
+                <div className="space-y-2 rounded-md border border-border/50 p-3">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm text-muted-foreground">Anonymous contribution</Label>
+                    <Switch checked={isAnonymous} onCheckedChange={setIsAnonymous} />
+                  </div>
+                  {isAnonymous && (
+                    <div className="space-y-1">
+                      <Input
+                        placeholder="Anonymous display name (optional)"
+                        value={anonymousDisplayName}
+                        onChange={(e) => {
+                          setAnonymousDisplayName(e.target.value)
+                          saveAnonymousDisplayName(e.target.value)
+                        }}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Stream uploader uses this name. Leave empty to use &quot;Anonymous&quot;.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <MultiContentWizard
+                analysis={mockAnalysis}
+                importMode={importMode}
+                onComplete={handleMultiContentComplete}
+                onCancel={handleClose}
+                isImporting={advancedImport.isPending}
+              />
+            </>
+          ) : (
+            // Single content mode
+            <>
+              <DialogHeader className="shrink-0">
+                <DialogTitle className="flex items-center gap-2">
+                  <Download className="h-5 w-5" />
+                  Advanced Import
+                </DialogTitle>
+                <DialogDescription>Import with full metadata control and file annotation support.</DialogDescription>
+              </DialogHeader>
+
+              <ScrollArea className="min-h-0 flex-1 pr-1">
+                <div className="space-y-4 pb-2">
+                  {/* Torrent Info */}
+                  <div className="p-3 rounded-lg border bg-muted/30 space-y-2">
+                    <p className="text-sm font-medium truncate" title={torrent.name}>
+                      {torrent.name}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                      <span className="flex items-center gap-1">
+                        <HardDrive className="h-3 w-3" />
+                        {formatBytes(torrent.size)}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <FileVideo className="h-3 w-3" />
+                        {torrentFiles.length} video{torrentFiles.length !== 1 ? 's' : ''}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Import Result */}
+                  {importResult && (
+                    <div
+                      className={cn(
+                        'p-3 rounded-lg border flex items-center gap-2',
+                        importResult.status === 'success' && 'bg-green-500/10 border-green-500/30',
+                        importResult.status === 'failed' && 'bg-red-500/10 border-red-500/30',
+                        importResult.status === 'skipped' && 'bg-yellow-500/10 border-yellow-500/30',
+                      )}
+                    >
+                      {importResult.status === 'success' && <CheckCircle2 className="h-4 w-4 text-green-500" />}
+                      {importResult.status === 'failed' && <XCircle className="h-4 w-4 text-red-500" />}
+                      {importResult.status === 'skipped' && <AlertCircle className="h-4 w-4 text-yellow-500" />}
+                      <span className="text-sm">{importResult.message}</span>
+                    </div>
+                  )}
+
+                  <div className="space-y-2 rounded-md border border-border/50 p-3">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-sm text-muted-foreground">Anonymous contribution</Label>
+                      <Switch checked={isAnonymous} onCheckedChange={setIsAnonymous} />
+                    </div>
+                    {isAnonymous && (
+                      <div className="space-y-1">
+                        <Input
+                          placeholder="Anonymous display name (optional)"
+                          value={anonymousDisplayName}
+                          onChange={(e) => {
+                            setAnonymousDisplayName(e.target.value)
+                            saveAnonymousDisplayName(e.target.value)
+                          }}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Stream uploader uses this name. Leave empty to use &quot;Anonymous&quot;.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Content Type & Import Mode */}
+                  <div className="space-y-3">
+                    <Label>Content Type & Import Mode</Label>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setContentType('movie')
+                          setSportsCategory('')
+                          setImportMode('single')
+                          setSelectedMedia(null)
+                        }}
+                        className={cn(
+                          'p-3 rounded-lg border-2 text-left transition-all',
+                          contentType === 'movie'
+                            ? 'border-primary bg-primary/10'
+                            : 'border-border/50 hover:border-primary/30',
+                        )}
+                      >
+                        <Film
+                          className={cn(
+                            'h-4 w-4 mb-1',
+                            contentType === 'movie' ? 'text-primary' : 'text-muted-foreground',
+                          )}
+                        />
+                        <p className={cn('text-sm font-medium', contentType === 'movie' && 'text-primary')}>Movie</p>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setContentType('series')
+                          setSportsCategory('')
+                          setImportMode('single')
+                          setSelectedMedia(null)
+                        }}
+                        className={cn(
+                          'p-3 rounded-lg border-2 text-left transition-all',
+                          contentType === 'series'
+                            ? 'border-primary bg-primary/10'
+                            : 'border-border/50 hover:border-primary/30',
+                        )}
+                      >
+                        <Tv
+                          className={cn(
+                            'h-4 w-4 mb-1',
+                            contentType === 'series' ? 'text-primary' : 'text-muted-foreground',
+                          )}
+                        />
+                        <p className={cn('text-sm font-medium', contentType === 'series' && 'text-primary')}>Series</p>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setContentType('sports')
+                          setImportMode('single')
+                          setSelectedMedia(null)
+                          setAnnotationDialogOpen(false)
+                          setFileAnnotations([])
+                        }}
+                        className={cn(
+                          'p-3 rounded-lg border-2 text-left transition-all',
+                          contentType === 'sports'
+                            ? 'border-primary bg-primary/10'
+                            : 'border-border/50 hover:border-primary/30',
+                        )}
+                      >
+                        <Trophy
+                          className={cn(
+                            'h-4 w-4 mb-1',
+                            contentType === 'sports' ? 'text-primary' : 'text-muted-foreground',
+                          )}
+                        />
+                        <p className={cn('text-sm font-medium', contentType === 'sports' && 'text-primary')}>Sports</p>
+                      </button>
+                    </div>
+
+                    {/* Import Mode Sub-options */}
+                    <div className="grid grid-cols-2 gap-2">
+                      {importModeOptions.map((option) => {
+                        const Icon = option.icon
+                        const isSelected = importMode === option.value
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => setImportMode(option.value as ImportMode)}
+                            className={cn(
+                              'p-2 rounded-lg border text-left transition-all flex items-center gap-2',
+                              isSelected
+                                ? 'border-primary/50 bg-primary/5'
+                                : 'border-border/30 hover:border-primary/30',
+                            )}
+                          >
+                            <Icon className={cn('h-4 w-4', isSelected ? 'text-primary' : 'text-muted-foreground')} />
+                            <div>
+                              <p className={cn('text-xs font-medium', isSelected && 'text-primary')}>{option.label}</p>
+                              <p className="text-[10px] text-muted-foreground">{option.description}</p>
+                            </div>
+                          </button>
+                        )
+                      })}
+                    </div>
+                    {contentType === 'sports' && (
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Sports Category</Label>
+                        <Select value={sportsCategory} onValueChange={(v) => setSportsCategory(v as SportsCategory)}>
+                          <SelectTrigger className="h-9 text-sm">
+                            <SelectValue placeholder="Select sports category" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {SPORTS_CATEGORY_OPTIONS.map((option) => (
+                              <SelectItem key={option.value} value={option.value}>
+                                {option.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Metadata Search */}
+                  <div className="space-y-2">
+                    <Label>Search Metadata</Label>
+                    <div className="flex gap-2">
+                      <div className="relative flex-1">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                        <Input
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          placeholder="Search for title..."
+                          className="pl-9"
+                        />
+                      </div>
+                      <Input
+                        type="number"
+                        inputMode="numeric"
+                        min={1878}
+                        max={9999}
+                        step={1}
+                        placeholder="Year"
+                        value={searchYear}
+                        onChange={(e) => setSearchYear(e.target.value)}
+                        className="w-24 shrink-0"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Media Details */}
+                  <div className="space-y-2">
+                    <Label>Media Details</Label>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <Input
+                        value={manualTitle}
+                        onChange={(e) => setManualTitle(e.target.value)}
+                        placeholder="Title"
+                        className="sm:col-span-2"
+                      />
+                      <Input
+                        value={poster}
+                        onChange={(e) => setPoster(e.target.value)}
+                        placeholder="Poster URL (optional)"
+                      />
+                      <Input
+                        value={background}
+                        onChange={(e) => setBackground(e.target.value)}
+                        placeholder="Background URL (optional)"
+                      />
+                      <Input
+                        type="date"
+                        value={releaseDate}
+                        onChange={(e) => setReleaseDate(e.target.value)}
+                        placeholder="Release date"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Search Results */}
+                  {(isSearching || searchResults.length > 0) && (
+                    <div className="space-y-2">
+                      <Label className="text-xs text-muted-foreground flex items-center gap-2">
+                        {searchResults.length} results
+                        {isFetchingSearch && (
+                          <span className="flex items-center gap-1 text-muted-foreground/70">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            loading more...
+                          </span>
+                        )}
+                      </Label>
+                      <ScrollArea className="h-[180px] border rounded-lg">
+                        <div className="p-2 space-y-1">
+                          {isSearching && searchResults.length === 0 ? (
+                            <div className="flex items-center justify-center py-8">
+                              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                            </div>
+                          ) : (
+                            searchResults.map((result) => (
+                              <button
+                                key={result.id}
+                                type="button"
+                                className={cn(
+                                  'w-full flex items-center gap-3 p-2 rounded-md text-left transition-colors',
+                                  selectedMedia?.id === result.id
+                                    ? 'bg-primary/20 border border-primary'
+                                    : 'hover:bg-muted',
+                                )}
+                                onClick={() => handleSelectMedia(result)}
+                              >
+                                {result.poster ? (
+                                  <img
+                                    src={result.poster}
+                                    alt={result.title}
+                                    className="w-10 h-14 object-cover rounded"
+                                  />
+                                ) : (
+                                  <div className="w-10 h-14 bg-muted rounded flex items-center justify-center">
+                                    {contentType === 'movie' ? (
+                                      <Film className="h-4 w-4 text-muted-foreground" />
+                                    ) : contentType === 'sports' ? (
+                                      <Trophy className="h-4 w-4 text-muted-foreground" />
+                                    ) : (
+                                      <Tv className="h-4 w-4 text-muted-foreground" />
+                                    )}
+                                  </div>
+                                )}
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-sm font-medium truncate">{result.title}</p>
+                                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                    {result.year && <span>{result.year}</span>}
+                                    {result.imdb_id && <span>• {result.imdb_id}</span>}
+                                    {result.source === 'internal' ? (
+                                      <Badge
+                                        variant="secondary"
+                                        className="text-[10px] px-1 py-0 bg-green-500/20 text-green-700"
+                                      >
+                                        In Library
+                                      </Badge>
+                                    ) : (
+                                      result.provider && (
+                                        <Badge variant="secondary" className="text-[10px] px-1 py-0">
+                                          {result.provider.toUpperCase()}
+                                        </Badge>
+                                      )
+                                    )}
+                                  </div>
+                                </div>
+                                {selectedMedia?.id === result.id && (
+                                  <CheckCircle2 className="h-4 w-4 text-primary flex-shrink-0" />
+                                )}
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      </ScrollArea>
+                    </div>
+                  )}
+
+                  {/* Selected Media */}
+                  {selectedMedia && (
+                    <div className="p-3 rounded-lg border border-primary bg-primary/5">
+                      <div className="flex items-center gap-3">
+                        {selectedMedia.poster ? (
+                          <img
+                            src={selectedMedia.poster}
+                            alt={selectedMedia.title}
+                            className="w-12 h-16 object-cover rounded"
+                          />
+                        ) : (
+                          <div className="w-12 h-16 bg-muted rounded flex items-center justify-center">
+                            {contentType === 'movie' ? (
+                              <Film className="h-5 w-5 text-muted-foreground" />
+                            ) : contentType === 'sports' ? (
+                              <Trophy className="h-5 w-5 text-muted-foreground" />
+                            ) : (
+                              <Tv className="h-5 w-5 text-muted-foreground" />
+                            )}
+                          </div>
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium">{selectedMedia.title}</p>
+                          <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                            {selectedMedia.year && <span>{selectedMedia.year}</span>}
+                            {selectedMedia.imdb_id && <span>• {selectedMedia.imdb_id}</span>}
+                            {selectedMedia.source === 'internal' ? (
+                              <Badge
+                                variant="secondary"
+                                className="text-[10px] px-1 py-0 bg-green-500/20 text-green-700"
+                              >
+                                In Library
+                              </Badge>
+                            ) : (
+                              selectedMedia.provider && (
+                                <Badge variant="secondary" className="text-[10px] px-1 py-0">
+                                  {selectedMedia.provider.toUpperCase()}
+                                </Badge>
+                              )
+                            )}
+                          </div>
+                        </div>
+                        <Badge variant="outline" className="text-primary border-primary">
+                          Selected
+                        </Badge>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* File Annotation Button */}
+                  {showAnnotationButton && (
+                    <Button variant="outline" className="w-full" onClick={() => setAnnotationDialogOpen(true)}>
+                      <FileVideo className="h-4 w-4 mr-2" />
+                      {`${contentType === 'series' ? 'Annotate Episode Files' : 'Annotate Files'} (${fileAnnotations.length || torrentFiles.length})`}
+                      {fileAnnotations.length > 0 && (
+                        <Badge variant="secondary" className="ml-2">
+                          Configured
+                        </Badge>
+                      )}
+                    </Button>
+                  )}
+                </div>
+              </ScrollArea>
+
+              <DialogFooter className="shrink-0">
+                <Button variant="outline" onClick={handleClose}>
+                  {importResult?.status === 'success' ? 'Done' : 'Cancel'}
+                </Button>
+                {importResult?.status !== 'success' && (
+                  <Button
+                    onClick={handleImport}
+                    disabled={
+                      advancedImport.isPending || (contentType === 'sports' ? !manualTitle.trim() : !selectedMedia)
+                    }
+                  >
+                    {advancedImport.isPending ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Importing...
+                      </>
+                    ) : (
+                      <>
+                        <Download className="mr-2 h-4 w-4" />
+                        Import
+                      </>
+                    )}
+                  </Button>
+                )}
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* File Annotation Dialog */}
+      <ImportFileAnnotationDialog
+        open={annotationDialogOpen}
+        onOpenChange={setAnnotationDialogOpen}
+        torrentName={torrent.name}
+        files={torrentFiles}
+        isSports={contentType === 'sports'}
+        onConfirm={handleAnnotationConfirm}
+        allowMultiContent={contentType === 'movie' || contentType === 'series'}
+        defaultMetaType={
+          contentType === 'series' || (contentType === 'sports' && sportsSearchType === 'series') ? 'series' : 'movie'
+        }
+      />
+    </>
+  )
+}

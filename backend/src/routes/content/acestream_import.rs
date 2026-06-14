@@ -1,0 +1,519 @@
+/// AceStream hash import endpoints.
+///
+/// Routes (prefix /api/v1/import):
+///   POST /acestream/analyze  → analyze_acestream
+///   POST /acestream          → import_acestream
+use std::sync::Arc;
+
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use chrono::Utc;
+use hmac::{Hmac, KeyInit, Mac};
+use serde::Deserialize;
+use serde_json::json;
+use sha2::Sha256;
+
+use super::import_helpers::{
+    award_contribution_points, create_contribution_record, enforce_upload_permissions,
+    fetch_user_info, notify_pending_contribution, resolve_uploader_identity,
+    should_auto_approve_import,
+};
+use crate::state::AppState;
+
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+
+fn validate_token(headers: &HeaderMap, secret_key: &str) -> Option<i64> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string)?;
+    let dot = token.rfind('.')?;
+    let (payload_str, sig) = token.split_at(dot);
+    let sig = &sig[1..];
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret_key.as_bytes()).ok()?;
+    mac.update(payload_str.as_bytes());
+    let expected: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if expected != sig {
+        return None;
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(payload_str).ok()?;
+    let data: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let exp = data["exp"].as_f64()?;
+    if exp < Utc::now().timestamp() as f64 {
+        return None;
+    }
+    if data["type"].as_str() != Some("access") {
+        return None;
+    }
+    data["sub"].as_str()?.parse().ok()
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+fn validate_hex_40(s: &str) -> bool {
+    s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn extract_acestream_id(input: &str) -> Option<String> {
+    // Handle acestream:// URI scheme
+    let candidate = if input.starts_with("acestream://") {
+        input.trim_start_matches("acestream://")
+    } else {
+        input
+    };
+    let candidate = candidate.trim();
+    if validate_hex_40(candidate) {
+        Some(candidate.to_lowercase())
+    } else {
+        None
+    }
+}
+
+// ─── Request structs ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct AnalyzeAcestreamRequest {
+    /// content_id is the primary 40-char hex AceStream ID
+    pub content_id: Option<String>,
+    /// info_hash is an optional alternative 40-char hex
+    pub info_hash: Option<String>,
+    /// Convenience: raw acestream:// URI
+    pub acestream_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ImportAcestreamRequest {
+    pub content_id: Option<String>,
+    pub info_hash: Option<String>,
+    pub acestream_url: Option<String>,
+    pub name: Option<String>,
+    pub meta_id: Option<String>,
+    pub meta_type: Option<String>,
+    pub title: Option<String>,
+    #[serde(default = "default_true")]
+    pub is_public: bool,
+    pub is_anonymous: Option<bool>,
+    pub anonymous_display_name: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+// ─── Handlers ─────────────────────────────────────────────────────────────────
+
+/// POST /api/v1/import/acestream/analyze
+pub async fn analyze_acestream(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AnalyzeAcestreamRequest>,
+) -> Response {
+    if validate_token(&headers, &state.config.secret_key_raw).is_none() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"detail": "Unauthorized"})),
+        )
+            .into_response();
+    }
+
+    // Resolve content_id from body fields
+    let content_id_raw = body
+        .content_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or_else(|| body.acestream_url.as_deref().filter(|s| !s.is_empty()));
+
+    let content_id = match content_id_raw.and_then(extract_acestream_id) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"detail": "content_id must be a 40-character hex string or acestream:// URI"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate optional info_hash
+    let info_hash = match &body.info_hash {
+        Some(h) if !h.is_empty() => {
+            if !validate_hex_40(h) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"detail": "info_hash must be a 40-character hex string"})),
+                )
+                    .into_response();
+            }
+            Some(h.to_lowercase())
+        }
+        _ => None,
+    };
+
+    // Check existing by content_id
+    let existing_by_cid: Option<i64> =
+        sqlx::query_scalar("SELECT stream_id FROM acestream_stream WHERE content_id = $1 LIMIT 1")
+            .bind(&content_id)
+            .fetch_optional(&state.pool_ro)
+            .await
+            .unwrap_or(None);
+
+    // Check existing by info_hash
+    let existing_by_hash: Option<i64> = if let Some(ref h) = info_hash {
+        sqlx::query_scalar("SELECT stream_id FROM acestream_stream WHERE info_hash = $1 LIMIT 1")
+            .bind(h)
+            .fetch_optional(&state.pool_ro)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+
+    let already_exists = existing_by_cid.is_some() || existing_by_hash.is_some();
+    let existing_stream_id = existing_by_cid.or(existing_by_hash);
+
+    Json(json!({
+        "content_id": content_id,
+        "info_hash": info_hash,
+        "already_exists": already_exists,
+        "existing_stream_id": existing_stream_id,
+    }))
+    .into_response()
+}
+
+pub async fn analyze_acestream_for_bot(
+    state: &AppState,
+    content_id: &str,
+    meta_type: &str,
+) -> serde_json::Value {
+    let id = match extract_acestream_id(content_id) {
+        Some(id) => id,
+        None => {
+            return json!({"success": false, "error": "Invalid AceStream ID"});
+        }
+    };
+    let matches = super::import_helpers::search_analyze_matches(
+        state,
+        None,
+        &format!("AceStream {id}"),
+        None,
+        meta_type,
+    )
+    .await;
+    json!({
+        "success": true,
+        "content_id": id,
+        "parsed_title": format!("AceStream {id}"),
+        "matches": matches,
+    })
+}
+
+/// POST /api/v1/import/acestream
+pub async fn import_acestream(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ImportAcestreamRequest>,
+) -> Response {
+    let user_id = match validate_token(&headers, &state.config.secret_key_raw) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"detail": "Unauthorized"})),
+            )
+                .into_response();
+        }
+    };
+
+    let user = match fetch_user_info(&state.pool_ro, user_id).await {
+        Some(u) => u,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"detail": "User not found"})),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err((status, msg)) = enforce_upload_permissions(
+        &state.pool,
+        &state.redis,
+        user_id,
+        user.uploads_restricted,
+        &user.role,
+    )
+    .await
+    {
+        return (status, Json(json!({"detail": msg}))).into_response();
+    }
+
+    let resolved_is_anonymous = body.is_anonymous.unwrap_or(user.contribute_anonymously);
+    let is_privileged = matches!(user.role.as_str(), "moderator" | "admin");
+    let auto_approve =
+        should_auto_approve_import(is_privileged, user.is_active, resolved_is_anonymous);
+    let (uploader_name, uploader_user_id) = resolve_uploader_identity(
+        resolved_is_anonymous,
+        body.anonymous_display_name.as_deref(),
+        &user.username,
+        user_id,
+    );
+    let is_public = super::import_helpers::stream_is_public_on_submit(auto_approve, body.is_public);
+
+    // Resolve content_id
+    let content_id_raw = body
+        .content_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or_else(|| body.acestream_url.as_deref().filter(|s| !s.is_empty()));
+
+    let content_id = match content_id_raw.and_then(extract_acestream_id) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"detail": "content_id must be a 40-character hex string or acestream:// URI"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate optional info_hash
+    let info_hash = match &body.info_hash {
+        Some(h) if !h.is_empty() => {
+            if !validate_hex_40(h) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"detail": "info_hash must be a 40-character hex string"})),
+                )
+                    .into_response();
+            }
+            Some(h.to_lowercase())
+        }
+        _ => None,
+    };
+
+    let stream_name = body
+        .name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or(body.title.as_deref())
+        .unwrap_or("AceStream")
+        .to_string();
+
+    let meta_type = body.meta_type.as_deref().unwrap_or("tv");
+    let effective_meta_id = body
+        .meta_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            super::import_helpers::synthetic_import_meta_id("acestream", &content_id)
+        });
+
+    let media_id = super::import_helpers::resolve_media_for_import(
+        &state.pool,
+        &state.http,
+        state.config.tmdb_api_key.as_deref(),
+        state.config.tvdb_api_key.as_deref(),
+        &effective_meta_id,
+        meta_type,
+        crate::scrapers::media_resolve::ImportMediaOverrides {
+            title: body.title.as_deref().or(Some(stream_name.as_str())),
+            poster: None,
+            background: None,
+            release_date: None,
+            year: None,
+        },
+        None,
+    )
+    .await
+    .map(i64::from);
+
+    async fn link_existing_acestream(
+        pool: &sqlx::PgPool,
+        existing_id: i64,
+        media_id: Option<i64>,
+        is_public: bool,
+    ) {
+        if let Some(mid) = media_id {
+            let _ = super::import_helpers::link_stream_to_media(
+                pool,
+                existing_id as i32,
+                crate::db::MediaId(mid as i32),
+            )
+            .await;
+        }
+        if is_public {
+            let _ =
+                sqlx::query("UPDATE stream SET is_public = true WHERE id = $1 AND NOT is_public")
+                    .bind(existing_id)
+                    .execute(pool)
+                    .await;
+        }
+    }
+
+    if let Some(existing_id) =
+        sqlx::query_scalar("SELECT stream_id FROM acestream_stream WHERE content_id = $1 LIMIT 1")
+            .bind(&content_id)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None)
+    {
+        link_existing_acestream(&state.pool, existing_id, media_id, is_public).await;
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"detail": "AceStream already imported", "stream_id": existing_id})),
+        )
+            .into_response();
+    }
+
+    if let Some(ref h) = info_hash {
+        if let Some(existing_id) = sqlx::query_scalar(
+            "SELECT stream_id FROM acestream_stream WHERE info_hash = $1 LIMIT 1",
+        )
+        .bind(h)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None)
+        {
+            link_existing_acestream(&state.pool, existing_id, media_id, is_public).await;
+            return (
+                StatusCode::CONFLICT,
+                Json(
+                    json!({"detail": "AceStream already imported (by info_hash)", "stream_id": existing_id}),
+                ),
+            )
+                .into_response();
+        }
+    }
+
+    let base = crate::db::StreamStoreBase {
+        name: stream_name.clone(),
+        source: "user_import".to_string(),
+        uploader: Some(uploader_name.clone()),
+        uploader_user_id: uploader_user_id.map(|id| id as i32),
+        is_public,
+        ..Default::default()
+    };
+
+    let normalized = crate::db::AcestreamStoreInput {
+        base,
+        content_id: content_id.clone(),
+        info_hash: info_hash.clone(),
+    };
+
+    let meta_type = body.meta_type.as_deref().unwrap_or("tv");
+    let media_type =
+        crate::db::MediaType::from_wire(meta_type).unwrap_or(crate::db::MediaType::Series);
+    let opts = media_id.map_or_else(
+        || crate::db::StoreStreamOpts {
+            media_id: crate::db::MediaId(0),
+            media_type,
+            season: None,
+            episode: None,
+            episode_end: None,
+            link_source: crate::db::LinkSource::User,
+            is_primary: true,
+            is_verified: false,
+        },
+        |mid| crate::db::StoreStreamOpts::user_import(crate::db::MediaId(mid as i32), media_type),
+    );
+
+    let stream_id: i64 =
+        match crate::db::store_acestream_stream(&state.pool, &normalized, &opts).await {
+            Ok(r) => r.stream_id().0 as i64,
+            Err(e) => {
+                tracing::error!("import_acestream store: {e}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+
+    let effective_meta_id = body
+        .meta_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            super::import_helpers::synthetic_import_meta_id("acestream", &content_id)
+        });
+
+    let data = serde_json::json!({
+        "name": stream_name,
+        "title": body.title.as_deref().unwrap_or(&stream_name),
+        "content_id": content_id,
+        "info_hash": info_hash,
+        "meta_type": body.meta_type.as_deref().unwrap_or("tv"),
+        "meta_id": effective_meta_id,
+        "uploader_name": uploader_name,
+        "anonymous_display_name": body.anonymous_display_name,
+        "is_anonymous": resolved_is_anonymous,
+        "is_public": is_public,
+    });
+
+    let mut contrib_id: Option<String> = None;
+    if let Ok(cid) = create_contribution_record(
+        &state.pool,
+        uploader_user_id,
+        "acestream",
+        Some(&content_id),
+        &data,
+        auto_approve,
+        is_privileged,
+    )
+    .await
+    {
+        if auto_approve {
+            if let Some(uid) = uploader_user_id {
+                award_contribution_points(&state.pool, uid, "acestream").await;
+            }
+        } else if let (Some(bot_token), Some(chat_id)) = (
+            state.config.telegram_bot_token.as_deref(),
+            state.config.telegram_chat_id.as_deref(),
+        ) {
+            notify_pending_contribution(
+                &state.http,
+                bot_token,
+                chat_id,
+                &state.config.host_url,
+                "acestream",
+                &uploader_name,
+                &data,
+            )
+            .await;
+        }
+        contrib_id = Some(cid);
+    }
+
+    let message = if auto_approve {
+        "AceStream imported successfully!".to_string()
+    } else {
+        super::import_helpers::pending_import_message("AceStream")
+    };
+
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "status": if auto_approve { "success" } else { "pending" },
+            "message": message,
+            "stream_id": stream_id,
+            "content_id": content_id,
+            "info_hash": info_hash,
+            "name": stream_name,
+            "media_id": media_id,
+            "contribution_id": contrib_id,
+            "auto_approved": auto_approve,
+        })),
+    )
+        .into_response()
+}

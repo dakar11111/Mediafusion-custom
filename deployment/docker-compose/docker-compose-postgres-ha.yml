@@ -1,0 +1,321 @@
+# PostgreSQL High Availability setup with primary and read replicas
+# This is an EXTENSION to the main docker-compose.yml
+# 
+# Usage: docker compose -f docker-compose.yml -f docker-compose-postgres-ha.yml up -d
+#
+# Connection strings:
+#   Primary (via PgBouncer):  postgresql+asyncpg://mediafusion:mediafusion@pgbouncer:6432/mediafusion
+#   Replica (via PgBouncer):  postgresql+asyncpg://mediafusion:mediafusion@pgbouncer-read:6432/mediafusion
+#
+# For production, consider using:
+# - Patroni for automatic failover
+# - Or managed PostgreSQL services (AWS RDS, CloudSQL, etc.)
+
+services:
+  # Override the primary postgres to enable replication
+  postgres:
+    image: postgres:18-alpine
+    shm_size: 1gb  # Must be >= shared_buffers (512MB) + overhead
+    environment:
+      POSTGRES_USER: mediafusion
+      POSTGRES_PASSWORD: mediafusion
+      POSTGRES_DB: mediafusion
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        # Create custom pg_hba.conf allowing replication connections
+        cat > /tmp/pg_hba.conf << 'HBAEOF'
+        # TYPE  DATABASE        USER            ADDRESS                 METHOD
+        local   all             all                                     trust
+        host    all             all             127.0.0.1/32            trust
+        host    all             all             ::1/128                 trust
+        host    all             all             0.0.0.0/0               md5
+        host    replication     all             0.0.0.0/0               md5
+        HBAEOF
+        
+        # Create init script to create required extensions
+        mkdir -p /docker-entrypoint-initdb.d
+        cat > /docker-entrypoint-initdb.d/01-extensions.sql << 'SQLEOF'
+        -- Create required PostgreSQL extensions for MediaFusion
+        CREATE EXTENSION IF NOT EXISTS pg_trgm;
+        SQLEOF
+        
+        exec docker-entrypoint.sh postgres \
+          -c wal_level=replica \
+          -c max_wal_senders=5 \
+          -c max_replication_slots=5 \
+          -c hot_standby=on \
+          -c synchronous_commit=on \
+          -c shared_buffers=512MB \
+          -c effective_cache_size=1536MB \
+          -c maintenance_work_mem=256MB \
+          -c checkpoint_completion_target=0.9 \
+          -c wal_buffers=32MB \
+          -c random_page_cost=1.1 \
+          -c effective_io_concurrency=200 \
+          -c work_mem=32MB \
+          -c max_connections=200 \
+          -c hba_file=/tmp/pg_hba.conf
+    volumes:
+      - postgres-data:/var/lib/postgresql
+
+  # Read replica 1
+  postgres-replica-1:
+    image: postgres:18-alpine
+    shm_size: 512mb  # Must be >= shared_buffers (256MB) + overhead
+    # NO POSTGRES_* env vars - we don't want automatic initialization
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        REPLICA_PGDATA="${PGDATA:-/var/lib/postgresql/18/docker}"
+        
+        # Ensure data directory exists with correct permissions
+        mkdir -p "$REPLICA_PGDATA"
+        chown -R postgres:postgres /var/lib/postgresql
+        chmod 700 "$REPLICA_PGDATA"
+        
+        echo "Waiting for primary to be ready..."
+        until pg_isready -h postgres -p 5432 -U mediafusion; do
+          sleep 2
+        done
+        echo "Primary is ready!"
+        
+        # Check if we need to initialize
+        if [ ! -f "$REPLICA_PGDATA/PG_VERSION" ]; then
+          echo "Initializing replica from primary..."
+          
+          # Take base backup from primary (run as postgres user)
+          # -R flag creates standby.signal and postgresql.auto.conf
+          rm -rf "$REPLICA_PGDATA"/*
+          su postgres -c "PGPASSWORD=mediafusion pg_basebackup \
+            -h postgres \
+            -U mediafusion \
+            -D $REPLICA_PGDATA \
+            -Fp -Xs -P -R"
+          
+          echo "Replica base backup complete!"
+        fi
+        
+        echo "Starting replica in standby mode..."
+        exec su postgres -c "postgres \
+          -D $REPLICA_PGDATA \
+          -c hot_standby=on \
+          -c hot_standby_feedback=on \
+          -c max_standby_streaming_delay=30s \
+          -c wal_receiver_status_interval=10s \
+          -c shared_buffers=256MB \
+          -c effective_cache_size=768MB"
+    volumes:
+      - postgres-replica-1-data:/var/lib/postgresql
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mediafusion -d mediafusion"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - mediafusion-network
+
+  # PgBouncer for connection pooling to primary
+  pgbouncer:
+    image: bitnami/pgbouncer:latest
+    environment:
+      - POSTGRESQL_HOST=postgres
+      - POSTGRESQL_PORT=5432
+      - POSTGRESQL_USERNAME=mediafusion
+      - POSTGRESQL_PASSWORD=mediafusion
+      - POSTGRESQL_DATABASE=mediafusion
+      - PGBOUNCER_DATABASE=mediafusion
+      - PGBOUNCER_POOL_MODE=transaction
+      - PGBOUNCER_MAX_CLIENT_CONN=1000
+      - PGBOUNCER_DEFAULT_POOL_SIZE=50
+      - PGBOUNCER_MIN_POOL_SIZE=10
+      - PGBOUNCER_RESERVE_POOL_SIZE=10
+    ports:
+      - "6432:6432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-p", "6432"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - mediafusion-network
+
+  # PgBouncer for read replicas
+  pgbouncer-read:
+    image: bitnami/pgbouncer:latest
+    environment:
+      - POSTGRESQL_HOST=postgres-replica-1
+      - POSTGRESQL_PORT=5432
+      - POSTGRESQL_USERNAME=mediafusion
+      - POSTGRESQL_PASSWORD=mediafusion
+      - POSTGRESQL_DATABASE=mediafusion
+      - PGBOUNCER_DATABASE=mediafusion
+      - PGBOUNCER_POOL_MODE=transaction
+      - PGBOUNCER_MAX_CLIENT_CONN=2000
+      - PGBOUNCER_DEFAULT_POOL_SIZE=100
+      - PGBOUNCER_MIN_POOL_SIZE=20
+      - PGBOUNCER_RESERVE_POOL_SIZE=20
+    ports:
+      - "6433:6432"
+    depends_on:
+      postgres-replica-1:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-p", "6432"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - mediafusion-network
+
+  # Override mediafusion to use PgBouncer
+  mediafusion:
+    environment:
+      # Use PgBouncer for write operations
+      - POSTGRES_URI=postgresql+asyncpg://mediafusion:mediafusion@pgbouncer:6432/mediafusion
+      # Use read replica PgBouncer for read operations
+      - POSTGRES_READ_URI=postgresql+asyncpg://mediafusion:mediafusion@pgbouncer-read:6432/mediafusion
+      # Disable asyncpg prepared-statement cache — required for PgBouncer transaction mode
+      - POSTGRES_USE_PGBOUNCER=true
+      - REDIS_URL=redis://redis:6379
+      - SCRAPLING_CDP_URL=${SCRAPLING_CDP_URL:-ws://browserless:3000}
+      - TASKIQ_SINGLE_WORKER_MODE=false
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      pgbouncer-read:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      browserless:
+        condition: service_started
+
+  # Override Taskiq workers to use PgBouncer
+  taskiq-worker-default:
+    environment:
+      - POSTGRES_URI=postgresql+asyncpg://mediafusion:mediafusion@pgbouncer:6432/mediafusion
+      - POSTGRES_READ_URI=postgresql+asyncpg://mediafusion:mediafusion@pgbouncer-read:6432/mediafusion
+      - POSTGRES_USE_PGBOUNCER=true
+      - REDIS_URL=redis://redis:6379
+      - SCRAPLING_CDP_URL=${SCRAPLING_CDP_URL:-ws://browserless:3000}
+      - TASKIQ_SINGLE_WORKER_MODE=false
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      browserless:
+        condition: service_started
+
+  taskiq-worker-scrapy:
+    image: mhdzumair/mediafusion:6.0.0-beta.22
+    command: ["taskiq", "worker", "workers.taskiq_worker:broker_scrapy", "--workers", "1", "--max-async-tasks", "1", "--ack-type", "when_executed"]
+    env_file: .env
+    environment:
+      - POSTGRES_URI=postgresql+asyncpg://mediafusion:mediafusion@pgbouncer:6432/mediafusion
+      - POSTGRES_READ_URI=postgresql+asyncpg://mediafusion:mediafusion@pgbouncer-read:6432/mediafusion
+      - POSTGRES_USE_PGBOUNCER=true
+      - REDIS_URL=redis://redis:6379
+      - SCRAPLING_CDP_URL=${SCRAPLING_CDP_URL:-ws://browserless:3000}
+      - TASKIQ_SINGLE_WORKER_MODE=false
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      browserless:
+        condition: service_started
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - mediafusion-network
+
+  taskiq-worker-import:
+    image: mhdzumair/mediafusion:6.0.0-beta.22
+    command: ["taskiq", "worker", "workers.taskiq_worker:broker_import", "--workers", "1", "--max-async-tasks", "4", "--ack-type", "when_executed"]
+    env_file: .env
+    environment:
+      - POSTGRES_URI=postgresql+asyncpg://mediafusion:mediafusion@pgbouncer:6432/mediafusion
+      - POSTGRES_READ_URI=postgresql+asyncpg://mediafusion:mediafusion@pgbouncer-read:6432/mediafusion
+      - POSTGRES_USE_PGBOUNCER=true
+      - REDIS_URL=redis://redis:6379
+      - SCRAPLING_CDP_URL=${SCRAPLING_CDP_URL:-ws://browserless:3000}
+      - TASKIQ_SINGLE_WORKER_MODE=false
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      browserless:
+        condition: service_started
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - mediafusion-network
+
+  taskiq-worker-priority:
+    image: mhdzumair/mediafusion:6.0.0-beta.22
+    command: ["taskiq", "worker", "workers.taskiq_worker:broker_priority", "--workers", "1", "--max-async-tasks", "4", "--ack-type", "when_executed"]
+    env_file: .env
+    environment:
+      - POSTGRES_URI=postgresql+asyncpg://mediafusion:mediafusion@pgbouncer:6432/mediafusion
+      - POSTGRES_READ_URI=postgresql+asyncpg://mediafusion:mediafusion@pgbouncer-read:6432/mediafusion
+      - POSTGRES_USE_PGBOUNCER=true
+      - REDIS_URL=redis://redis:6379
+      - SCRAPLING_CDP_URL=${SCRAPLING_CDP_URL:-ws://browserless:3000}
+      - TASKIQ_SINGLE_WORKER_MODE=false
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      browserless:
+        condition: service_started
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - mediafusion-network
+
+volumes:
+  postgres-replica-1-data:
+    driver: local

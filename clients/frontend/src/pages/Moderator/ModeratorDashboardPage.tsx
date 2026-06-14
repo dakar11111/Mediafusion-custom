@@ -1,0 +1,377 @@
+import { useSearchParams } from 'react-router-dom'
+import { ArrowRightLeft, Clock, FileVideo, Film, Magnet, Settings, Shield, ThumbsDown, ThumbsUp } from 'lucide-react'
+
+import { Badge } from '@/components/ui/badge'
+import { Card, CardContent } from '@/components/ui/card'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { useAuth } from '@/contexts/AuthContext'
+import {
+  usePendingContributions,
+  usePendingSuggestions,
+  useStreamSuggestionStats,
+  useStreamsNeedingAnnotation,
+  useSuggestionStats,
+} from '@/hooks'
+import type { ContributionStatus, StreamSuggestionStatus, SuggestionStatus } from '@/lib/api'
+
+import {
+  AnnotationRequestsTab,
+  ContributionsTab,
+  ContributionSettingsTab,
+  MediaMigrationTab,
+  PendingSuggestionsTab,
+  StreamSuggestionsTab,
+  type ModeratorTab,
+} from './components'
+
+const CONTRIBUTION_TYPES = [
+  'all',
+  'metadata',
+  'stream',
+  'torrent',
+  'telegram',
+  'youtube',
+  'nzb',
+  'http',
+  'acestream',
+] as const
+
+export function ModeratorDashboardPage() {
+  const { user } = useAuth()
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  const { data: pendingData } = usePendingSuggestions({ page: 1, page_size: 1 })
+  const { data: suggestionStats } = useSuggestionStats()
+  const { data: streamStats } = useStreamSuggestionStats()
+  const { data: pendingContributions } = usePendingContributions({ page: 1, page_size: 1 })
+  // Match the default annotation tab query so React Query can reuse
+  // the same response and avoid duplicate heavy requests.
+  const { data: annotationData } = useStreamsNeedingAnnotation({ page: 1, per_page: 20 })
+
+  const pendingCount = pendingData?.total ?? 0
+  const pendingContributionsCount = pendingContributions?.total ?? 0
+  const streamPendingCount = streamStats?.pending ?? 0
+  const annotationCount = annotationData?.total ?? 0
+
+  const approvedToday = (suggestionStats?.approved_today ?? 0) + (streamStats?.approved_today ?? 0)
+  const rejectedToday = (suggestionStats?.rejected_today ?? 0) + (streamStats?.rejected_today ?? 0)
+
+  const isModerator = user?.role === 'moderator' || user?.role === 'admin'
+  const isAdmin = user?.role === 'admin'
+
+  const tabParam = searchParams.get('tab')
+  const activeTab: ModeratorTab =
+    tabParam === 'contributions' ||
+    tabParam === 'annotations' ||
+    tabParam === 'streams' ||
+    tabParam === 'pending' ||
+    tabParam === 'migration'
+      ? tabParam
+      : tabParam === 'settings' && isAdmin
+        ? tabParam
+        : 'contributions'
+
+  const contributionStatusParam = searchParams.get('contentStatus')
+  const contributionStatusFilter: 'all' | ContributionStatus =
+    contributionStatusParam === 'all' ||
+    contributionStatusParam === 'pending' ||
+    contributionStatusParam === 'approved' ||
+    contributionStatusParam === 'rejected'
+      ? contributionStatusParam
+      : 'pending'
+
+  const contributionTypeParam = searchParams.get('contentType')
+  const contributionTypeFilter: string = CONTRIBUTION_TYPES.includes(
+    contributionTypeParam as (typeof CONTRIBUTION_TYPES)[number],
+  )
+    ? (contributionTypeParam ?? 'all')
+    : 'all'
+  const contributionContributorFilter = searchParams.get('contentContributor') || 'all'
+  const contributionUploaderQuery = searchParams.get('contentUploader') || ''
+  const contributionReviewerQuery = searchParams.get('contentReviewer') || ''
+  const contributionPageParam = Number(searchParams.get('contentPage') || '1')
+  const contributionPage =
+    Number.isInteger(contributionPageParam) && contributionPageParam > 0 ? contributionPageParam : 1
+
+  const streamStatusParam = searchParams.get('streamStatus')
+  const streamStatusFilter: 'all' | StreamSuggestionStatus =
+    streamStatusParam === 'all' ||
+    streamStatusParam === 'pending' ||
+    streamStatusParam === 'approved' ||
+    streamStatusParam === 'auto_approved' ||
+    streamStatusParam === 'rejected'
+      ? streamStatusParam
+      : 'all'
+
+  const metadataStatusParam = searchParams.get('metadataStatus')
+  const metadataStatusFilter: SuggestionStatus | 'all' =
+    metadataStatusParam === 'all' ||
+    metadataStatusParam === 'pending' ||
+    metadataStatusParam === 'approved' ||
+    metadataStatusParam === 'auto_approved' ||
+    metadataStatusParam === 'rejected'
+      ? metadataStatusParam
+      : 'all'
+
+  const updateModeratorParams = (updates: Array<{ key: string; value: string; defaultValue: string }>) => {
+    const next = new URLSearchParams(searchParams)
+    updates.forEach(({ key, value, defaultValue }) => {
+      if (value === defaultValue) {
+        next.delete(key)
+      } else {
+        next.set(key, value)
+      }
+    })
+    setSearchParams(next, { replace: true })
+  }
+
+  const updateModeratorParam = (key: string, value: string, defaultValue: string) => {
+    updateModeratorParams([{ key, value, defaultValue }])
+  }
+
+  const handleTabChange = (value: string) => {
+    const nextTab: ModeratorTab =
+      value === 'contributions' ||
+      value === 'annotations' ||
+      value === 'streams' ||
+      value === 'pending' ||
+      value === 'migration' ||
+      (value === 'settings' && isAdmin)
+        ? (value as ModeratorTab)
+        : 'contributions'
+    updateModeratorParam('tab', nextTab, 'contributions')
+  }
+
+  if (!isModerator) {
+    return (
+      <div className="text-center py-12">
+        <Shield className="h-16 w-16 mx-auto text-muted-foreground opacity-50" />
+        <p className="mt-4 text-lg font-medium">Access Denied</p>
+        <p className="text-sm text-muted-foreground mt-2">
+          You need moderator or admin privileges to access this page.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-3xl font-bold tracking-tight flex items-center gap-3">
+          <div className="p-2 rounded-xl bg-gradient-to-br from-primary to-primary/80 shadow-lg shadow-primary/20">
+            <Shield className="h-5 w-5 text-white" />
+          </div>
+          Moderator Dashboard
+        </h1>
+        <p className="text-muted-foreground mt-1">Review and manage user-submitted metadata corrections</p>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        <Card className="glass border-border/50">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-orange-500/10 shrink-0">
+                <Magnet className="h-4 w-4 text-orange-500" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xl font-bold leading-tight">{pendingContributionsCount}</p>
+                <p className="text-xs text-muted-foreground leading-tight">Content Imports</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="glass border-border/50">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-cyan-500/10 shrink-0">
+                <FileVideo className="h-4 w-4 text-cyan-500" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xl font-bold leading-tight">{annotationCount}</p>
+                <p className="text-xs text-muted-foreground leading-tight">Annotations</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="glass border-border/50">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-primary/10 shrink-0">
+                <Clock className="h-4 w-4 text-primary" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xl font-bold leading-tight">{pendingCount + streamPendingCount}</p>
+                <p className="text-xs text-muted-foreground leading-tight">Stream/Meta Edits</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="glass border-border/50">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-emerald-500/10 shrink-0">
+                <ThumbsUp className="h-4 w-4 text-emerald-500" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xl font-bold leading-tight">{approvedToday}</p>
+                <p className="text-xs text-muted-foreground leading-tight">Approved Today</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="glass border-border/50 col-span-2 sm:col-span-1">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-red-500/10 shrink-0">
+                <ThumbsDown className="h-4 w-4 text-red-500" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xl font-bold leading-tight">{rejectedToday}</p>
+                <p className="text-xs text-muted-foreground leading-tight">Rejected Today</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-6">
+        <TabsList className="h-auto p-1.5 bg-muted/50 rounded-xl flex flex-wrap gap-1 w-full justify-start">
+          <TabsTrigger
+            value="contributions"
+            className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm py-2 px-3 text-sm flex-1 min-w-fit"
+          >
+            <Magnet className="mr-1.5 h-4 w-4 shrink-0" />
+            Content Imports
+            {pendingContributionsCount > 0 && (
+              <Badge variant="secondary" className="ml-1.5 h-5 px-1.5 text-xs bg-orange-500/20 text-orange-600">
+                {pendingContributionsCount}
+              </Badge>
+            )}
+          </TabsTrigger>
+          <TabsTrigger
+            value="annotations"
+            className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm py-2 px-3 text-sm flex-1 min-w-fit"
+          >
+            <FileVideo className="mr-1.5 h-4 w-4 shrink-0" />
+            File Annotations
+            {annotationCount > 0 && (
+              <Badge variant="secondary" className="ml-1.5 h-5 px-1.5 text-xs bg-cyan-500/20 text-cyan-600">
+                {annotationCount}
+              </Badge>
+            )}
+          </TabsTrigger>
+          <TabsTrigger
+            value="streams"
+            className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm py-2 px-3 text-sm flex-1 min-w-fit"
+          >
+            <Film className="mr-1.5 h-4 w-4 shrink-0" />
+            Streams
+            {streamPendingCount > 0 && (
+              <Badge variant="secondary" className="ml-1.5 h-5 px-1.5 text-xs bg-blue-500/20 text-blue-600">
+                {streamPendingCount}
+              </Badge>
+            )}
+          </TabsTrigger>
+          <TabsTrigger
+            value="pending"
+            className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm py-2 px-3 text-sm flex-1 min-w-fit"
+          >
+            <Clock className="mr-1.5 h-4 w-4 shrink-0" />
+            Metadata
+            {pendingCount > 0 && (
+              <Badge variant="secondary" className="ml-1.5 h-5 px-1.5 text-xs bg-primary/20 text-primary">
+                {pendingCount}
+              </Badge>
+            )}
+          </TabsTrigger>
+          <TabsTrigger
+            value="migration"
+            className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm py-2 px-3 text-sm flex-1 min-w-fit"
+          >
+            <ArrowRightLeft className="mr-1.5 h-4 w-4 shrink-0" />
+            Migration
+          </TabsTrigger>
+          {user?.role === 'admin' && (
+            <TabsTrigger
+              value="settings"
+              className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm py-2 px-3 text-sm flex-1 min-w-fit"
+            >
+              <Settings className="mr-1.5 h-4 w-4 shrink-0" />
+              Settings
+            </TabsTrigger>
+          )}
+        </TabsList>
+
+        <TabsContent value="contributions">
+          <ContributionsTab
+            statusFilter={contributionStatusFilter}
+            onStatusFilterChange={(status) =>
+              updateModeratorParams([
+                { key: 'contentStatus', value: status, defaultValue: 'pending' },
+                { key: 'contentPage', value: '1', defaultValue: '1' },
+              ])
+            }
+            typeFilter={contributionTypeFilter}
+            onTypeFilterChange={(type) =>
+              updateModeratorParams([
+                { key: 'contentType', value: type, defaultValue: 'all' },
+                { key: 'contentPage', value: '1', defaultValue: '1' },
+              ])
+            }
+            contributorFilter={contributionContributorFilter}
+            onContributorFilterChange={(contributor) =>
+              updateModeratorParams([
+                { key: 'contentContributor', value: contributor, defaultValue: 'all' },
+                { key: 'contentPage', value: '1', defaultValue: '1' },
+              ])
+            }
+            uploaderQuery={contributionUploaderQuery}
+            onUploaderQueryChange={(value) =>
+              updateModeratorParams([
+                { key: 'contentUploader', value, defaultValue: '' },
+                { key: 'contentPage', value: '1', defaultValue: '1' },
+              ])
+            }
+            reviewerQuery={contributionReviewerQuery}
+            onReviewerQueryChange={(value) =>
+              updateModeratorParams([
+                { key: 'contentReviewer', value, defaultValue: '' },
+                { key: 'contentPage', value: '1', defaultValue: '1' },
+              ])
+            }
+            page={contributionPage}
+            onPageChange={(value) => updateModeratorParam('contentPage', String(value), '1')}
+          />
+        </TabsContent>
+
+        <TabsContent value="annotations">
+          <AnnotationRequestsTab />
+        </TabsContent>
+
+        <TabsContent value="streams">
+          <StreamSuggestionsTab
+            statusFilter={streamStatusFilter}
+            onStatusFilterChange={(status) => updateModeratorParam('streamStatus', status, 'all')}
+          />
+        </TabsContent>
+
+        <TabsContent value="pending">
+          <PendingSuggestionsTab
+            statusFilter={metadataStatusFilter}
+            onStatusFilterChange={(status) => updateModeratorParam('metadataStatus', status, 'all')}
+          />
+        </TabsContent>
+
+        <TabsContent value="migration">
+          <MediaMigrationTab />
+        </TabsContent>
+
+        {user?.role === 'admin' && (
+          <TabsContent value="settings">
+            <ContributionSettingsTab />
+          </TabsContent>
+        )}
+      </Tabs>
+    </div>
+  )
+}

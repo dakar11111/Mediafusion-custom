@@ -1,0 +1,134 @@
+import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import {
+  contributionsApi,
+  type ContributionContributorListParams,
+  type ContributionListParams,
+  type ContributionBulkReviewRequest,
+  type ContributionBulkReviewResponse,
+  type ContributionCreateRequest,
+  type ContributionAdminFlagRequest,
+  type ContributionAdminRejectRequest,
+  type ContributionReviewRequest,
+  type ContributionType,
+} from '@/lib/api'
+
+const CONTRIBUTIONS_QUERY_KEY = ['contributions']
+
+export function useContributions(params: ContributionListParams = {}) {
+  return useQuery({
+    queryKey: [...CONTRIBUTIONS_QUERY_KEY, params],
+    queryFn: () => contributionsApi.list(params),
+    placeholderData: keepPreviousData,
+  })
+}
+
+export function useContributionContributors(params: ContributionContributorListParams = {}) {
+  return useQuery({
+    queryKey: [...CONTRIBUTIONS_QUERY_KEY, 'contributors', params],
+    queryFn: () => contributionsApi.listContributors(params),
+    placeholderData: keepPreviousData,
+  })
+}
+
+export function useContribution(contributionId: string | undefined) {
+  return useQuery({
+    queryKey: [...CONTRIBUTIONS_QUERY_KEY, contributionId],
+    queryFn: () => contributionsApi.get(contributionId!),
+    enabled: !!contributionId,
+  })
+}
+
+export function useContributionStats() {
+  return useQuery({
+    queryKey: [...CONTRIBUTIONS_QUERY_KEY, 'stats'],
+    queryFn: () => contributionsApi.getStats(),
+  })
+}
+
+export function useCreateContribution() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: ContributionCreateRequest) => contributionsApi.create(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: CONTRIBUTIONS_QUERY_KEY })
+    },
+  })
+}
+
+export function useDeleteContribution() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (contributionId: string) => contributionsApi.delete(contributionId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: CONTRIBUTIONS_QUERY_KEY })
+    },
+  })
+}
+
+// Moderator hooks
+
+export function usePendingContributions(
+  params: { contribution_type?: ContributionType; page?: number; page_size?: number } = {},
+) {
+  return useQuery({
+    queryKey: [...CONTRIBUTIONS_QUERY_KEY, 'pending', params],
+    queryFn: () => contributionsApi.listPending(params),
+  })
+}
+
+export function useReviewContribution() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ contributionId, data }: { contributionId: string; data: ContributionReviewRequest }) =>
+      contributionsApi.review(contributionId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: CONTRIBUTIONS_QUERY_KEY })
+    },
+  })
+}
+
+export function useFlagContributionForAdminReview() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ contributionId, data }: { contributionId: string; data: ContributionAdminFlagRequest }) =>
+      contributionsApi.flagForAdminReview(contributionId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: CONTRIBUTIONS_QUERY_KEY })
+    },
+  })
+}
+
+export function useRejectApprovedContribution() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ contributionId, data }: { contributionId: string; data: ContributionAdminRejectRequest }) =>
+      contributionsApi.rejectApproved(contributionId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: CONTRIBUTIONS_QUERY_KEY })
+    },
+  })
+}
+
+export function useBulkReviewContributions() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: ContributionBulkReviewRequest): Promise<ContributionBulkReviewResponse> =>
+      contributionsApi.bulkReview(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: CONTRIBUTIONS_QUERY_KEY })
+    },
+  })
+}
+
+export function useAllContributionStats() {
+  return useQuery({
+    queryKey: [...CONTRIBUTIONS_QUERY_KEY, 'all-stats'],
+    queryFn: () => contributionsApi.getAllStats(),
+  })
+}

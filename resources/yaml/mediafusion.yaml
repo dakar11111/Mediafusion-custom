@@ -1,0 +1,154 @@
+# MediaFusion Prowlarr Indexer Definition (Cardigann/YML format)
+#
+# ============================================================================
+# SETUP GUIDE FOR PROWLARR
+# ============================================================================
+#
+# Option A: Native Torznab (Recommended)
+# ----------------------------------------
+# MediaFusion exposes a native Torznab API. This is the simplest and most
+# reliable way to integrate with Prowlarr, Sonarr, and Radarr.
+#
+# 1. In Prowlarr, go to Indexers → Add → Generic → Torznab (Generic)
+# 2. Configure:
+#    - Name:     MediaFusion
+#    - URL:      https://your-mediafusion-url.com/torznab
+#    - API Key:  <api_password> (private instances)
+#                Leave blank on public instances
+#    - Categories:
+#        Movies:  2000, 2010, 2020, 2030, 2040, 2045, 2050, 2060
+#        TV:      5000, 5010, 5020, 5030, 5040, 5045, 5060, 5070
+# 3. Click "Test" to verify the connection.
+# 4. Save the indexer.
+#
+# Option B: Custom Indexer Definition (this file)
+# -------------------------------------------------
+# If you prefer to use Prowlarr's custom indexer YAML format, copy this file
+# into Prowlarr's custom definitions directory:
+#
+#   Docker:  /config/Definitions/Custom/mediafusion.yaml
+#   Linux:   ~/.config/Prowlarr/Definitions/Custom/mediafusion.yaml
+#   Windows: %AppData%\Prowlarr\Definitions\Custom\mediafusion.yaml
+#
+# Then restart Prowlarr and add "MediaFusion" from the indexer list.
+#
+# ============================================================================
+# API KEY FORMAT
+# ============================================================================
+#
+# - Public instances: API key is optional (leave blank)
+# - Private instances: API_PASSWORD
+#
+# ============================================================================
+# TORZNAB API ENDPOINTS
+# ============================================================================
+#
+# Base URL:    {host}/torznab
+# Alt URL:     {host}/torznab/api
+#
+# Capabilities (no auth):  GET /torznab?t=caps
+# Movie search:            GET /torznab?t=movie&imdbid=tt0110357&apikey=YOUR_KEY
+# TV search:               GET /torznab?t=tvsearch&imdbid=tt0959621&season=1&ep=1&apikey=YOUR_KEY
+# General search:          GET /torznab?t=search&q=query&apikey=YOUR_KEY
+#
+# Supported params: q, imdbid, tmdbid, season, ep, cat, limit, offset
+#
+# ============================================================================
+
+id: mediafusion
+name: MediaFusion
+description: "MediaFusion Torznab Indexer - Open-source Streaming Platform"
+language: en-US
+type: semi-private
+encoding: UTF-8
+followredirect: false
+testlinktorrent: false
+requestDelay: 2
+links:
+  - https://mediafusion.elfhosted.com/torznab
+
+legacylinks:
+  - https://mediafusion.elfhosted.com
+
+caps:
+  categories:
+    2000: Movies
+    2010: Movies/Foreign
+    2020: Movies/Other
+    2030: Movies/SD
+    2040: Movies/HD
+    2045: Movies/UHD
+    2050: Movies/BluRay
+    2060: Movies/3D
+    5000: TV
+    5010: TV/Foreign
+    5020: TV/SD
+    5030: TV/HD
+    5040: TV/Other
+    5045: TV/UHD
+    5060: TV/Sport
+    5070: TV/Anime
+
+  modes:
+    search: [q]
+    movie-search: [q, imdbid, tmdbid]
+    tv-search: [q, imdbid, tmdbid, season, ep]
+  allowrawsearch: false
+
+settings:
+  - name: apikey
+    type: text
+    label: API Key
+    default: ""
+    tooltip: "Private instances: enter API_PASSWORD. Public instances: leave blank."
+
+search:
+  paths:
+    - path: "?t={{ if eq .Categories.0 \"Movies\" }}movie{{ else if eq .Categories.0 \"TV\" }}tvsearch{{ else }}search{{ end }}&apikey={{ .Config.apikey }}&q={{ .Keywords }}&limit=100{{ if .Query.IMDBID }}&imdbid={{ .Query.IMDBID }}{{ end }}{{ if .Query.TMDBID }}&tmdbid={{ .Query.TMDBID }}{{ end }}{{ if .Query.Season }}&season={{ .Query.Season }}{{ end }}{{ if .Query.Ep }}&ep={{ .Query.Ep }}{{ end }}"
+      response:
+        type: xml
+
+  # Torznab native XML response parsing
+  rows:
+    selector: rss channel item
+
+  fields:
+    title:
+      selector: title
+    category:
+      selector: "torznab:attr[name='category']"
+      attribute: value
+    infohash:
+      selector: "torznab:attr[name='infohash']"
+      attribute: value
+    magneturl:
+      selector: "torznab:attr[name='magneturl']"
+      attribute: value
+    magnet:
+      selector: "torznab:attr[name='magneturl']"
+      attribute: value
+    size:
+      selector: size
+    seeders:
+      selector: "torznab:attr[name='seeders']"
+      attribute: value
+      optional: true
+    leechers:
+      selector: "torznab:attr[name='peers']"
+      attribute: value
+      optional: true
+    imdbid:
+      selector: "torznab:attr[name='imdb']"
+      attribute: value
+      optional: true
+    tmdbid:
+      selector: "torznab:attr[name='tmdbid']"
+      attribute: value
+      optional: true
+    date:
+      selector: pubDate
+      optional: true
+    details:
+      selector: guid
+    download:
+      selector: link

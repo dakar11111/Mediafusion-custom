@@ -1,0 +1,628 @@
+/// OffCloud streaming provider.
+///
+/// Token format: raw API key used as Bearer token.
+use serde_json::Value;
+
+use crate::providers::{
+    file_selection::select_debrid_file_index, response_json, torrents::transport::MediaFlowForward,
+    ProviderError,
+};
+
+const BASE_URL: &str = "https://offcloud.com";
+
+// ─── Video file selection helper ──────────────────────────────────────────────
+
+fn select_video_file(
+    files: &[(String, i64)],
+    release_name: &str,
+    filename: Option<&str>,
+    file_index: Option<i32>,
+    season: Option<i32>,
+    episode: Option<i32>,
+) -> usize {
+    select_debrid_file_index(
+        files,
+        release_name,
+        filename,
+        file_index,
+        season,
+        episode,
+        None,
+    )
+}
+
+// ─── HTTP helpers ─────────────────────────────────────────────────────────────
+
+/// GET request with Bearer auth.
+async fn oc_get(
+    http: &reqwest::Client,
+    token: &str,
+    path: &str,
+    forward: Option<&MediaFlowForward>,
+) -> Result<Value, ProviderError> {
+    let url = format!("{BASE_URL}{path}");
+    let resp = if let Some(fwd) = forward {
+        fwd.get(http, &url, token).await?
+    } else {
+        http.get(&url).bearer_auth(token).send().await?
+    };
+
+    let status = resp.status();
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return Err(ProviderError::api(
+            "Invalid OffCloud API key",
+            "invalid_token.mp4",
+        ));
+    }
+    if status == reqwest::StatusCode::PAYMENT_REQUIRED {
+        return Err(ProviderError::api(
+            "Need premium OffCloud account",
+            "need_premium.mp4",
+        ));
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(ProviderError::api(
+            "OffCloud rate limit exceeded",
+            "too_many_requests.mp4",
+        ));
+    }
+
+    let body: Value = response_json(resp, "oc_get").await?;
+    check_offcloud_error(&body)?;
+    Ok(body)
+}
+
+/// POST request with JSON body and Bearer auth.
+async fn oc_post_json(
+    http: &reqwest::Client,
+    token: &str,
+    path: &str,
+    body: serde_json::Value,
+    forward: Option<&MediaFlowForward>,
+) -> Result<Value, ProviderError> {
+    let url = format!("{BASE_URL}{path}");
+    let body_str = body.to_string();
+    let resp = if let Some(fwd) = forward {
+        fwd.post_json(http, &url, token, body_str).await?
+    } else {
+        http.post(&url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?
+    };
+
+    let status = resp.status();
+    if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(ProviderError::api(
+            "Invalid OffCloud API key",
+            "invalid_token.mp4",
+        ));
+    }
+    if status == reqwest::StatusCode::PAYMENT_REQUIRED {
+        return Err(ProviderError::api(
+            "Need premium OffCloud account",
+            "need_premium.mp4",
+        ));
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(ProviderError::api(
+            "OffCloud rate limit exceeded",
+            "too_many_requests.mp4",
+        ));
+    }
+
+    let body: Value = response_json(resp, "oc_post_json").await?;
+    check_offcloud_error(&body)?;
+    Ok(body)
+}
+
+fn offcloud_needs_premium(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("not_available")
+        || lower.contains("not premium")
+        || lower.contains("premium required")
+        || lower.contains("account not premium")
+}
+
+fn check_offcloud_error(body: &Value) -> Result<(), ProviderError> {
+    // Check for premium/plan errors anywhere in the response
+    if let Some(s) = body.as_str() {
+        if offcloud_needs_premium(s) {
+            return Err(ProviderError::api(
+                "Need premium OffCloud account",
+                "need_premium.mp4",
+            ));
+        }
+    }
+    if let Some(obj) = body.as_object() {
+        for (_, v) in obj {
+            if v.as_str().is_some_and(offcloud_needs_premium) {
+                return Err(ProviderError::api(
+                    "Need premium OffCloud account",
+                    "need_premium.mp4",
+                ));
+            }
+        }
+    }
+    if let Some(error) = body.get("error") {
+        let msg = error.as_str().unwrap_or("Unknown OffCloud error");
+        if offcloud_needs_premium(msg) {
+            return Err(ProviderError::api(
+                format!("OffCloud error: {msg}"),
+                "need_premium.mp4",
+            ));
+        }
+        if matches!(msg, "NOAUTH" | "UNAUTHORIZED")
+            || msg.to_lowercase().contains("auth")
+            || msg.to_lowercase().contains("invalid or missing")
+        {
+            return Err(ProviderError::api(
+                format!("OffCloud error: {msg}"),
+                "invalid_token.mp4",
+            ));
+        }
+        return Err(ProviderError::api(
+            format!("OffCloud error: {msg}"),
+            "api_error.mp4",
+        ));
+    }
+    Ok(())
+}
+
+// ─── OffCloud API operations ──────────────────────────────────────────────────
+
+/// Search cloud history for a torrent matching info_hash.
+async fn find_in_history(
+    http: &reqwest::Client,
+    token: &str,
+    info_hash: &str,
+    forward: Option<&MediaFlowForward>,
+) -> Result<Option<Value>, ProviderError> {
+    let body = oc_get(http, token, "/api/cloud/history", forward).await?;
+    let hash_lower = info_hash.to_lowercase();
+
+    let arr = match body.as_array() {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+
+    Ok(arr
+        .iter()
+        .find(|item| {
+            item.get("originalLink")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_lowercase().contains(&hash_lower))
+                .unwrap_or(false)
+        })
+        .cloned())
+}
+
+/// Submit a magnet link to OffCloud cloud download.
+async fn submit_magnet(
+    http: &reqwest::Client,
+    token: &str,
+    magnet: &str,
+    forward: Option<&MediaFlowForward>,
+) -> Result<String, ProviderError> {
+    let body = oc_post_json(
+        http,
+        token,
+        "/api/cloud",
+        serde_json::json!({"url": magnet}),
+        forward,
+    )
+    .await?;
+
+    body.get("requestId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            ProviderError::api(
+                "Missing requestId in OffCloud submit response",
+                "transfer_error.mp4",
+            )
+        })
+}
+
+/// Get the status of a cloud download request.
+async fn get_torrent_status(
+    http: &reqwest::Client,
+    token: &str,
+    request_id: &str,
+    forward: Option<&MediaFlowForward>,
+) -> Result<Value, ProviderError> {
+    let body = oc_post_json(
+        http,
+        token,
+        "/api/cloud/status",
+        serde_json::json!({"requestId": request_id}),
+        forward,
+    )
+    .await?;
+
+    // The API may return a `status` object directly or a `requests` array
+    if body.get("status").is_some() {
+        return Ok(body);
+    }
+    if let Some(arr) = body.get("requests").and_then(|v| v.as_array()) {
+        if let Some(first) = arr.first() {
+            return Ok(first.clone());
+        }
+    }
+    // May be returned as the whole object
+    Ok(body)
+}
+
+fn extract_status_str(info: &Value) -> &str {
+    // May be in info["status"]["status"] or info["status"] string or info["requests"][0]["status"]
+    if let Some(s) = info
+        .get("status")
+        .and_then(|v| v.as_object())
+        .and_then(|obj| obj.get("status"))
+        .and_then(|v| v.as_str())
+    {
+        return s;
+    }
+    if let Some(s) = info.get("status").and_then(|v| v.as_str()) {
+        return s;
+    }
+    ""
+}
+
+/// Wait for a request to reach "downloaded" status.
+async fn wait_for_downloaded(
+    http: &reqwest::Client,
+    token: &str,
+    request_id: &str,
+    max_retries: u32,
+    retry_interval_secs: u64,
+    forward: Option<&MediaFlowForward>,
+) -> Result<Value, ProviderError> {
+    for attempt in 0..max_retries {
+        let info = get_torrent_status(http, token, request_id, forward).await?;
+        let status = extract_status_str(&info);
+
+        if status.eq_ignore_ascii_case("downloaded") {
+            return Ok(info);
+        }
+
+        if matches!(status, "error" | "failed" | "dead") {
+            return Err(ProviderError::api(
+                format!("OffCloud download entered error status: {status}"),
+                "transfer_error.mp4",
+            ));
+        }
+
+        if attempt + 1 < max_retries {
+            tokio::time::sleep(tokio::time::Duration::from_secs(retry_interval_secs)).await;
+        }
+    }
+    Err(ProviderError::api(
+        format!("OffCloud download did not reach 'downloaded' status after {max_retries} retries"),
+        "torrent_not_downloaded.mp4",
+    ))
+}
+
+/// Get the direct download URL(s) for a finished cloud request.
+async fn explore_torrent(
+    http: &reqwest::Client,
+    token: &str,
+    request_id: &str,
+    forward: Option<&MediaFlowForward>,
+) -> Result<Vec<String>, ProviderError> {
+    let body = oc_get(
+        http,
+        token,
+        &format!("/api/cloud/explore/{request_id}"),
+        forward,
+    )
+    .await?;
+
+    match body {
+        Value::Array(arr) => Ok(arr
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect()),
+        _ => Ok(vec![]),
+    }
+}
+
+/// Try to resolve a single-file torrent URL directly from the status response,
+/// without needing to call explore.
+fn try_single_file_url(info: &Value, request_id: &str) -> Option<String> {
+    // Direct `url` field
+    if let Some(url) = info.get("url").and_then(|v| v.as_str()) {
+        if !url.is_empty() {
+            return Some(url.to_string());
+        }
+    }
+
+    // isDirectory == false with server + fileName
+    let is_dir = info
+        .get("isDirectory")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    if !is_dir {
+        if let (Some(server), Some(file_name)) = (
+            info.get("server").and_then(|v| v.as_str()),
+            info.get("fileName").and_then(|v| v.as_str()),
+        ) {
+            return Some(format!(
+                "https://{server}.offcloud.com/cloud/download/{request_id}/{file_name}"
+            ));
+        }
+    }
+
+    None
+}
+
+/// Select a URL from the explore list by matching basename against filename/episode.
+fn select_url_from_list(
+    urls: &[String],
+    release_name: &str,
+    filename: Option<&str>,
+    file_index: Option<i32>,
+    season: Option<i32>,
+    episode: Option<i32>,
+) -> Option<String> {
+    if urls.is_empty() {
+        return None;
+    }
+
+    // Build (basename, dummy_size) pairs for select_video_file
+    let pairs: Vec<(String, i64)> = urls
+        .iter()
+        .map(|url| {
+            let basename = url
+                .split('/')
+                .next_back()
+                .and_then(|s| {
+                    // Strip query string if any
+                    s.split('?').next()
+                })
+                .unwrap_or(url.as_str())
+                .to_string();
+            (basename, 0i64)
+        })
+        .collect();
+
+    let idx = select_video_file(&pairs, release_name, filename, file_index, season, episode);
+    urls.get(idx).cloned()
+}
+
+// ─── Public entry points ──────────────────────────────────────────────────────
+
+/// Resolve a direct video URL from OffCloud for the given torrent.
+#[allow(clippy::too_many_arguments)]
+pub async fn get_video_url(
+    http: &reqwest::Client,
+    token: &str,
+    info_hash: &str,
+    announce_list: &[String],
+    filename: Option<&str>,
+    file_index: Option<i32>,
+    season: Option<i32>,
+    episode: Option<i32>,
+    _user_ip: Option<&str>,
+    forward: Option<&crate::providers::torrents::transport::MediaFlowForward>,
+) -> Result<String, ProviderError> {
+    const MAX_RETRIES: u32 = 5;
+    const RETRY_INTERVAL: u64 = 5;
+
+    let magnet = format!(
+        "magnet:?xt=urn:btih:{}&{}",
+        info_hash,
+        announce_list
+            .iter()
+            .map(|t| format!("tr={}", urlencoding::encode(t)))
+            .collect::<Vec<_>>()
+            .join("&")
+    );
+
+    // Check history for existing download
+    let request_id = match find_in_history(http, token, info_hash, forward).await? {
+        Some(existing) => existing
+            .get("requestId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                ProviderError::api(
+                    "Missing requestId in OffCloud history entry",
+                    "api_error.mp4",
+                )
+            })?,
+        None => submit_magnet(http, token, &magnet, forward).await?,
+    };
+
+    // Wait for completion
+    let torrent_info = wait_for_downloaded(
+        http,
+        token,
+        &request_id,
+        MAX_RETRIES,
+        RETRY_INTERVAL,
+        forward,
+    )
+    .await?;
+
+    // Try single-file shortcut first
+    if let Some(url) = try_single_file_url(&torrent_info, &request_id) {
+        return Ok(url);
+    }
+
+    // Multi-file: explore and select
+    let urls = explore_torrent(http, token, &request_id, forward).await?;
+
+    let release_name = torrent_info
+        .get("fileName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    select_url_from_list(&urls, release_name, filename, file_index, season, episode).ok_or_else(
+        || {
+            ProviderError::api(
+                "No matching video file found in OffCloud torrent",
+                "torrent_not_downloaded.mp4",
+            )
+        },
+    )
+}
+
+/// Delete the cloud download matching `info_hash` from OffCloud.
+/// Returns `true` if found and deleted, `false` if not found.
+pub async fn delete_torrent_by_hash(
+    http: &reqwest::Client,
+    token: &str,
+    info_hash: &str,
+) -> Result<bool, ProviderError> {
+    match find_in_history(http, token, info_hash, None).await? {
+        None => Ok(false),
+        Some(item) => {
+            if let Some(request_id) = item.get("requestId").and_then(|v| v.as_str()) {
+                oc_get(
+                    http,
+                    token,
+                    &format!("/api/cloud/remove/{request_id}"),
+                    None,
+                )
+                .await
+                .ok();
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// Delete ALL cloud downloads from the user's OffCloud account.
+pub async fn delete_all_torrents(http: &reqwest::Client, token: &str) -> Result<(), ProviderError> {
+    let body = oc_get(http, token, "/api/cloud/history", None).await?;
+
+    let items = match body.as_array() {
+        Some(arr) => arr.clone(),
+        None => return Ok(()),
+    };
+
+    let request_ids: Vec<serde_json::Value> = items
+        .iter()
+        .filter_map(|item| {
+            item.get("requestId")
+                .and_then(|v| v.as_str())
+                .map(|id| serde_json::Value::String(id.to_string()))
+        })
+        .collect();
+
+    if request_ids.is_empty() {
+        return Ok(());
+    }
+
+    oc_post_json(
+        http,
+        token,
+        "/api/cloud/remove",
+        serde_json::json!({"requests": request_ids}),
+        None,
+    )
+    .await
+    .ok();
+
+    Ok(())
+}
+
+// ─── Torrent list ────────────────────────────────────────────────────────────
+
+fn extract_btih(s: &str) -> Option<String> {
+    let lower = s.to_lowercase();
+    let prefix = "urn:btih:";
+    let pos = lower.find(prefix)?;
+    let rest = &s[pos + prefix.len()..];
+    let hash: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if hash.len() >= 32 {
+        Some(hash.to_lowercase())
+    } else {
+        None
+    }
+}
+
+/// Return all cloud history items that have a btih hash, ready for the missing-import flow.
+pub async fn list_downloaded_torrents(
+    http: &reqwest::Client,
+    token: &str,
+) -> Result<
+    Vec<crate::providers::torrents::realdebrid::DownloadedTorrent>,
+    crate::providers::ProviderError,
+> {
+    let body = oc_get(http, token, "/api/cloud/history", None).await?;
+    let items = match body.as_array() {
+        Some(a) => a.clone(),
+        None => return Ok(vec![]),
+    };
+
+    Ok(items
+        .into_iter()
+        .filter_map(|item| {
+            let original_link = item
+                .get("originalLink")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let info_hash = extract_btih(original_link)?;
+            let request_id = item
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let file_name = item
+                .get("fileName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let fv = item.get("fileSize");
+            let file_size = fv
+                .and_then(|v| v.as_i64())
+                .or_else(|| fv.and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+                .unwrap_or(0);
+
+            Some(crate::providers::torrents::realdebrid::DownloadedTorrent {
+                id: request_id,
+                info_hash,
+                name: file_name.clone(),
+                size: file_size,
+                raw: serde_json::json!({"files": [{"name": file_name, "size": file_size}]}),
+            })
+        })
+        .collect())
+}
+
+// ─── Debrid cache check ───────────────────────────────────────────────────────
+
+/// Check which hashes are cached on OffCloud (POST /api/cache).
+pub async fn check_cached(http: &reqwest::Client, token: &str, hashes: &[String]) -> Vec<String> {
+    let url = "https://offcloud.com/api/cache";
+    let body = serde_json::json!({"hashes": hashes});
+    let resp = match http.post(url).bearer_auth(token).json(&body).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            // Best-effort: transport failure just returns empty; treat all hashes as uncached.
+            tracing::debug!(
+                error_kind = crate::util::http::transport_error_kind(&e),
+                "offcloud cache: {e}"
+            );
+            return vec![];
+        }
+    };
+    let body: serde_json::Value = match response_json(resp, "offcloud cache").await {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    body.get("cachedItems")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}

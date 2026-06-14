@@ -1,0 +1,28 @@
+# Prometheus config for local dev — scrapes the Rust server on the host machine.
+# host.docker.internal resolves to the host IP from inside Docker.
+#
+# The Rust server must have ENABLE_PROMETHEUS_METRICS=true.
+# Set PROMETHEUS_METRICS_TOKEN to match the server's PROMETHEUS_METRICS_TOKEN.
+# Leave it empty/unset if the server has no token configured.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: mediafusion-rust
+    static_configs:
+      - targets: ["host.docker.internal:8001"]
+    metrics_path: /api/v1/metrics
+    authorization:
+      credentials: "${PROMETHEUS_METRICS_TOKEN:-}"
+
+  # Optional: Redis exporter if running locally on the default port
+  - job_name: redis
+    static_configs:
+      - targets: ["host.docker.internal:9121"]
+
+  # Optional: Postgres exporter if running locally
+  - job_name: postgres
+    static_configs:
+      - targets: ["host.docker.internal:9187"]

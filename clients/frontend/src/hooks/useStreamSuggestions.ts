@@ -1,0 +1,146 @@
+import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import {
+  streamSuggestionsApi,
+  type StreamIssueTriageRequest,
+  type StreamSuggestionCreateRequest,
+  type StreamSuggestionReviewRequest,
+  type StreamSuggestionListParams,
+  type ModeratorStreamSuggestionStatus,
+} from '@/lib/api'
+
+// Query keys
+export const streamSuggestionKeys = {
+  all: ['stream-suggestions'] as const,
+  stream: (streamId: string) => [...streamSuggestionKeys.all, 'stream', streamId] as const,
+  my: () => [...streamSuggestionKeys.all, 'my'] as const,
+  pending: () => [...streamSuggestionKeys.all, 'pending'] as const,
+  stats: () => [...streamSuggestionKeys.all, 'stats'] as const,
+}
+
+export const streamSignalsKeys = {
+  all: ['stream-signals'] as const,
+  stream: (streamId: number) => [...streamSignalsKeys.all, streamId] as const,
+}
+
+// Get suggestions for a stream
+export function useStreamSuggestions(streamId: number | undefined, params: StreamSuggestionListParams = {}) {
+  return useQuery({
+    queryKey: [...streamSuggestionKeys.stream(String(streamId!)), params],
+    queryFn: () => streamSuggestionsApi.getStreamSuggestions(streamId!, params),
+    enabled: streamId !== undefined,
+  })
+}
+
+// Get user's own stream suggestions
+export function useMyStreamSuggestions(params: StreamSuggestionListParams = {}) {
+  return useQuery({
+    queryKey: [...streamSuggestionKeys.my(), params],
+    queryFn: () => streamSuggestionsApi.getMySuggestions(params),
+  })
+}
+
+// Params for pending stream suggestions (includes suggestion_type filter)
+type PendingStreamSuggestionParams = Omit<StreamSuggestionListParams, 'status'> & {
+  status?: ModeratorStreamSuggestionStatus
+  suggestion_type?: string
+}
+
+// Get pending suggestions (moderator)
+export function usePendingStreamSuggestions(params: PendingStreamSuggestionParams = {}) {
+  return useQuery({
+    queryKey: [...streamSuggestionKeys.pending(), params],
+    queryFn: () => streamSuggestionsApi.getPendingSuggestions(params),
+    placeholderData: keepPreviousData,
+  })
+}
+
+// Get stats (moderator)
+export function useStreamSuggestionStats() {
+  return useQuery({
+    queryKey: streamSuggestionKeys.stats(),
+    queryFn: () => streamSuggestionsApi.getStats(),
+  })
+}
+
+// Create stream suggestion
+export function useCreateStreamSuggestion() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ streamId, data }: { streamId: number; data: StreamSuggestionCreateRequest }) =>
+      streamSuggestionsApi.createSuggestion(streamId, data),
+    onSuccess: (_, { streamId }) => {
+      queryClient.invalidateQueries({ queryKey: streamSuggestionKeys.stream(String(streamId)) })
+      queryClient.invalidateQueries({ queryKey: streamSuggestionKeys.pending() })
+      queryClient.invalidateQueries({ queryKey: streamSuggestionKeys.stats() })
+      queryClient.invalidateQueries({ queryKey: streamSignalsKeys.stream(streamId) })
+    },
+  })
+}
+
+// Review stream suggestion (moderator)
+export function useReviewStreamSuggestion() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ suggestionId, data }: { suggestionId: string; data: StreamSuggestionReviewRequest }) =>
+      streamSuggestionsApi.reviewSuggestion(suggestionId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: streamSuggestionKeys.all })
+    },
+  })
+}
+
+// Bulk review stream suggestions (moderator)
+export function useBulkReviewStreamSuggestions() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({
+      suggestionIds,
+      action,
+      reviewNotes,
+    }: {
+      suggestionIds: string[]
+      action: 'approve' | 'reject'
+      reviewNotes?: string
+    }) => streamSuggestionsApi.bulkReview(suggestionIds, action, reviewNotes),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: streamSuggestionKeys.all })
+    },
+  })
+}
+
+// Delete stream suggestion
+export function useDeleteStreamSuggestion() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (suggestionId: string) => streamSuggestionsApi.deleteSuggestion(suggestionId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: streamSuggestionKeys.all })
+    },
+  })
+}
+
+export function useStreamSignals(streamId: number | undefined) {
+  return useQuery({
+    queryKey: streamSignalsKeys.stream(streamId!),
+    queryFn: () => streamSuggestionsApi.getStreamSignals(streamId!),
+    enabled: streamId !== undefined,
+    staleTime: 20_000,
+  })
+}
+
+export function useUpdateStreamIssueTriage() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ suggestionId, data }: { suggestionId: string; data: StreamIssueTriageRequest }) =>
+      streamSuggestionsApi.updateIssueTriage(suggestionId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: streamSuggestionKeys.all })
+      queryClient.invalidateQueries({ queryKey: streamSignalsKeys.all })
+    },
+  })
+}
