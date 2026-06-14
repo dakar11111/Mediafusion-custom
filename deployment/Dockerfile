@@ -7,8 +7,8 @@ RUN pnpm install --frozen-lockfile
 COPY clients/frontend/ ./
 RUN pnpm run build
 
-# --- Rust Builder Stage ---
-FROM rust:1.80-slim AS rust-builder
+# --- Rust Builder Stage (UPDATED TO 1.86 FOR EDITION 2024 SUPPORT) ---
+FROM rust:1.86-slim AS rust-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY . .
 
-# --- FIX: Move into the Rust workspace directory before compiling ---
+# Move into the Rust workspace directory before compiling
 WORKDIR /app/backend/rust
 RUN cargo build --release
 
