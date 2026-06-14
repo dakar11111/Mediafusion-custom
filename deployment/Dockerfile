@@ -7,10 +7,12 @@ RUN pnpm install --frozen-lockfile
 COPY clients/frontend/ ./
 RUN pnpm run build
 
-# --- Rust Builder Stage (UPDATED TO 1.91 FOR LATEST AWS SDK COMPATIBILITY) ---
+# --- Rust Builder Stage (ADDED BUILD-ESSENTIAL FOR JEMALLOC COMPILATION) ---
 FROM rust:1.91-slim AS rust-builder
 
+# Install necessary build dependencies, including build-essential for C-dependency compiling
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     pkg-config \
     libssl-dev \
     git \
