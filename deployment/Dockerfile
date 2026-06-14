@@ -7,10 +7,9 @@ RUN pnpm install --frozen-lockfile
 COPY clients/frontend/ ./
 RUN pnpm run build
 
-# --- Rust Builder Stage (ADDED BUILD-ESSENTIAL FOR JEMALLOC COMPILATION) ---
+# --- Rust Builder Stage ---
 FROM rust:1.91-slim AS rust-builder
 
-# Install necessary build dependencies, including build-essential for C-dependency compiling
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
@@ -25,9 +24,9 @@ COPY . .
 WORKDIR /app/backend/rust
 RUN cargo build --release
 
-# Copy the compiled binaries out to the expected root paths
-RUN cp target/release/mediafusion-api /mediafusion-api && \
-    cp target/release/mediafusion-worker /mediafusion-worker
+# --- FIX: Copy out from the correct central target location ---
+RUN cp /app/backend/target/release/mediafusion-api /mediafusion-api && \
+    cp /app/backend/target/release/mediafusion-worker /mediafusion-worker
 
 
 # ── Single runtime image (API default, worker via CMD override) ───────────────
