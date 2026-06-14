@@ -7,8 +7,8 @@ RUN pnpm install --frozen-lockfile
 COPY clients/frontend/ ./
 RUN pnpm run build
 
-# --- Rust Builder Stage (UPDATED TO 1.86 FOR EDITION 2024 SUPPORT) ---
-FROM rust:1.86-slim AS rust-builder
+# --- Rust Builder Stage (UPDATED TO 1.91 FOR LATEST AWS SDK COMPATIBILITY) ---
+FROM rust:1.91-slim AS rust-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
