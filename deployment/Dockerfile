@@ -7,10 +7,9 @@ RUN pnpm install --frozen-lockfile
 COPY clients/frontend/ ./
 RUN pnpm run build
 
-# --- FIX: Compile Rust components directly during the build ---
+# --- Rust Builder Stage ---
 FROM rust:1.80-slim AS rust-builder
 
-# Install necessary build dependencies for Rust compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
@@ -18,13 +17,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-# Copy the entire source code into the builder stage
 COPY . .
 
-# Compile the application binaries in release mode
+# --- FIX: Move into the Rust workspace directory before compiling ---
+WORKDIR /app/backend/rust
 RUN cargo build --release
 
-# Copy the compiled binaries to the expected locations for the runtime stage
+# Copy the compiled binaries out to the expected root paths
 RUN cp target/release/mediafusion-api /mediafusion-api && \
     cp target/release/mediafusion-worker /mediafusion-worker
 
@@ -44,9 +43,8 @@ RUN apt-get update && \
 RUN groupadd -r mediafusion && \
     useradd --no-log-init -r -g mediafusion -m -d /home/mediafusion mediafusion
 
-# Pull the binaries we just built from the rust-builder stage
-COPY --from=rust-builder --chown=mediafusion:mediafusion /mediafusion-api    /usr/local/bin/mediafusion-api
-COPY --from=rust-builder --chown=mediafusion:mediafusion /mediafusion-worker /usr/local/bin/mediafusion-worker
+COPY --from=rust-builder /mediafusion-api    /usr/local/bin/mediafusion-api
+COPY --from=rust-builder /mediafusion-worker /usr/local/bin/mediafusion-worker
 
 COPY --chown=mediafusion:mediafusion . /mediafusion
 
@@ -60,5 +58,4 @@ USER mediafusion
 
 EXPOSE 8000
 
-# Default: run the API server.
 CMD ["/usr/local/bin/mediafusion-api"]
